@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
+using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace OpenClawDebugger;
 
@@ -27,6 +29,26 @@ public partial class MainWindow : Window
     private Dictionary<string, string> _originalStickerTags = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _previewCancellation;
     private bool _busy;
+    private bool _serverConnected;
+    private bool _loadingThemeSelection;
+    private DispatcherTimer? _gifTimer;
+    private IReadOnlyList<BitmapFrame> _gifFrames = [];
+    private IReadOnlyList<TimeSpan> _gifDelays = [];
+    private int _gifFrameIndex;
+
+    private static readonly string[] ThemeColorSuffixes =
+    [
+        "0A0F19", "0B1020", "0D1524", "0F1828", "111A2B", "132039", "172338", "1B2940",
+        "202B3D", "253149", "263A59", "2765C8", "294267", "33445F", "3B6DB0", "3B80E8",
+        "72A7FF", "92A0B7", "AFC0D9", "B8C7DC", "D2B984", "E7ECF5", "FFFFFF"
+    ];
+
+    private static readonly Dictionary<string, string[]> ThemePalettes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Light"] = ["#EEF2F7", "#F3F6FB", "#F8FAFC", "#F1F5F9", "#FFFFFF", "#EAF1FB", "#EAF0F8", "#E8EEF7", "#E2E8F0", "#D7DFEA", "#DBEAFE", "#2563EB", "#B7CDF0", "#CFD8E6", "#BFDBFE", "#1D4ED8", "#2563EB", "#64748B", "#475569", "#475569", "#9A6700", "#1B2738", "#1B2738"],
+        ["Atri"] = ["#A0E8F5E5", "#20FFF9E8", "#B0FFFDF6", "#C0FCFAF2", "#B8F8F4E7", "#D8EDF8EA", "#E8FFFDF7", "#CCEEF3E3", "#B8D3E3D2", "#AA9FBCA9", "#D8E8ECD8", "#CC169E9A", "#B5308A82", "#B37C9684", "#C3348D99", "#E029B6A8", "#FF168D82", "#FF67796F", "#FF354A41", "#FF263831", "#FFE0A648", "#FF172624", "#FFFEFEF8"],
+        ["Luoxi"] = ["#AEEFE5DD", "#24FEF2E8", "#B8FBF7F2", "#C7F6EEE6", "#C2EEE4DC", "#D8EDE0D8", "#E6F5E8E2", "#CEE5D8CE", "#B8D6C5B8", "#B8896D70", "#E4F3E3DE", "#C8B20D3E", "#B68F2B4C", "#B36F4B4D", "#C07C3149", "#E4C43050", "#FFE23F5A", "#FF79686E", "#FF60444A", "#FF3B2C36", "#FFF0A85D", "#FF251D25", "#FFFFFBF8"]
+    };
 
     public MainWindow()
     {
@@ -39,6 +61,11 @@ public partial class MainWindow : Window
         {
             _settings = await SettingsRepository.LoadAsync();
             _snapshots = new LocalSnapshotStore(_settings.PrivateDirectory);
+            _loadingThemeSelection = true;
+            if (string.IsNullOrWhiteSpace(_settings.ThemeName) || !ThemePalettes.ContainsKey(_settings.ThemeName)) _settings.ThemeName = "Atri";
+            ApplyTheme(_settings.ThemeName);
+            ThemeSelector.SelectedValue = _settings.ThemeName;
+            _loadingThemeSelection = false;
             ShowSettings();
             SnapshotPathText.Text = Path.Combine(_settings.PrivateDirectory, "Rollback");
             RootPathsText.Text = $"工作区：{_settings.Connection.WorkspacePath}    ·    表情包：{_settings.Connection.StickersPath}";
@@ -78,6 +105,69 @@ public partial class MainWindow : Window
         return true;
     }
 
+    private async void ThemeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingThemeSelection || ThemeSelector.SelectedValue is not string themeName ||
+            string.Equals(_settings.ThemeName, themeName, StringComparison.OrdinalIgnoreCase)) return;
+
+        ApplyTheme(themeName);
+        _settings.ThemeName = themeName;
+        var selected = ThemeSelector.SelectedItem as ComboBoxItem;
+        var displayName = selected?.Content?.ToString() ?? themeName;
+        ThemeStatusText.Text = $"当前主题：{displayName}";
+        try
+        {
+            await SettingsRepository.SaveAsync(_settings);
+            SetStatus($"主题“{displayName}”已应用并保存。");
+        }
+        catch (Exception ex)
+        {
+            ThemeStatusText.Text = $"主题已预览，但保存失败：{ex.Message}";
+            ShowError(ex);
+        }
+    }
+
+    private void ApplyTheme(string themeName)
+    {
+        if (!ThemePalettes.TryGetValue(themeName, out var colors))
+        {
+            themeName = "Atri";
+            colors = ThemePalettes[themeName];
+        }
+
+        for (var i = 0; i < ThemeColorSuffixes.Length; i++)
+        {
+            var color = (Color)ColorConverter.ConvertFromString(colors[i])!;
+            var brush = new SolidColorBrush(color);
+            brush.Freeze();
+            Resources["Tone_" + ThemeColorSuffixes[i]] = brush;
+        }
+
+        var backgroundUri = themeName switch
+        {
+            "Atri" => "pack://application:,,,/Assets/Backgrounds/Atri.jpg",
+            "Luoxi" => "pack://application:,,,/Assets/Backgrounds/Luoxi.jpg",
+            _ => null
+        };
+        if (backgroundUri is null)
+        {
+            ThemeBackdropImage.Source = null;
+            ThemeBackdropImage.Visibility = Visibility.Collapsed;
+            ThemeBackdropWash.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.UriSource = new Uri(backgroundUri, UriKind.Absolute);
+            bitmap.EndInit();
+            bitmap.Freeze();
+            ThemeBackdropImage.Source = bitmap;
+            ThemeBackdropImage.Visibility = Visibility.Visible;
+            ThemeBackdropWash.Visibility = Visibility.Visible;
+        }
+    }
     private async void SaveSettings_Click(object sender, RoutedEventArgs e)
     {
         if (!ReadSettingsFromUi()) return;
@@ -85,6 +175,11 @@ public partial class MainWindow : Window
         {
             await SettingsRepository.SaveAsync(_settings);
             _snapshots = new LocalSnapshotStore(_settings.PrivateDirectory);
+            _loadingThemeSelection = true;
+            if (string.IsNullOrWhiteSpace(_settings.ThemeName) || !ThemePalettes.ContainsKey(_settings.ThemeName)) _settings.ThemeName = "Atri";
+            ApplyTheme(_settings.ThemeName);
+            ThemeSelector.SelectedValue = _settings.ThemeName;
+            _loadingThemeSelection = false;
             RootPathsText.Text = $"工作区：{_settings.Connection.WorkspacePath}    ·    表情包：{_settings.Connection.StickersPath}";
             SnapshotPathText.Text = Path.Combine(_settings.PrivateDirectory, "Rollback");
             SetStatus("设置已保存到仓库外的私密目录。");
@@ -125,11 +220,13 @@ public partial class MainWindow : Window
         try { await SettingsRepository.SaveAsync(_settings); }
         catch (Exception ex) { ShowError(ex); return; }
         _snapshots ??= new LocalSnapshotStore(_settings.PrivateDirectory);
+        _serverConnected = false;
         SetBusy(true);
         ConnectionStatusText.Text = "正在连接";
         try
         {
             _files = await _remote.ConnectAndListAsync(_settings.Connection);
+            _serverConnected = true;
             var memoryFiles = _files
                 .Where(x => x.Root == "workspace" && !x.IsImage && x.Editable)
                 .OrderBy(x => x.RelativePath.StartsWith("memory/", StringComparison.Ordinal) ? 1 : 0)
@@ -147,6 +244,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _serverConnected = false;
             ConnectionStatusText.Text = "连接失败";
             RefreshButton.IsEnabled = false;
             SetStatus(ex.Message, isError: true);
@@ -154,6 +252,39 @@ public partial class MainWindow : Window
         finally { SetBusy(false); }
     }
 
+    private async void BackupServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || !_serverConnected) return;
+
+        var backupRoot = SettingsRepository.DefaultBackupDirectory;
+        SetBusy(true);
+        BackupButton.Content = "正在备份…";
+        try
+        {
+            var progress = new Progress<long>(bytes =>
+                SetStatus($"正在接收服务器备份：{bytes / (1024d * 1024d):N1} MiB"));
+            var store = new LocalServerBackupStore(backupRoot);
+            var result = await store.CreateAsync(_settings.Connection, _remote, progress);
+            SetStatus($"整机快照完成：{result.ArchiveBytes:N0} B");
+            MessageBox.Show(this,
+                $"服务器备份已完成。{Environment.NewLine}{Environment.NewLine}" +
+                $"位置：{result.Directory}{Environment.NewLine}" +
+                $"快照文件：{result.ArchivePath}{Environment.NewLine}" +
+                $"压缩包大小：{result.ArchiveBytes:N0} B{Environment.NewLine}" +
+                $"SHA-256：{result.Sha256}",
+                "备份完成", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"服务器备份失败：{ex.Message}", isError: true);
+            ShowError(ex);
+        }
+        finally
+        {
+            BackupButton.Content = "备份服务器";
+            SetBusy(false);
+        }
+    }
     private async Task LoadStickerCatalogAsync()
     {
         _catalogFile = _files.FirstOrDefault(x => x.Root == "stickers" && x.RelativePath == "catalog.json");
@@ -162,6 +293,7 @@ public partial class MainWindow : Window
         _catalogContent = null;
         _manifestContent = null;
         SaveStickerButton.IsEnabled = false;
+        StopGifAnimation();
         StickerPreviewImage.Source = null;
 
         if (_catalogFile is null || _manifestFile is null)
@@ -323,14 +455,16 @@ public partial class MainWindow : Window
     private async void StickerGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (StickerGrid.SelectedItem is not StickerRow row) return;
+        StopGifAnimation();
+        StickerPreviewImage.Source = null;
+        _previewCancellation?.Cancel();
+        _previewCancellation?.Dispose();
         StickerPreviewTitle.Text = row.ImagePath;
         StickerPreviewTags.Text = string.IsNullOrWhiteSpace(row.TagsText) ? "当前没有标签" : $"标签：{row.TagsText}";
         var file = _files.FirstOrDefault(x => x.Root == "stickers" && x.IsImage &&
             string.Equals(x.RelativePath, row.ImagePath, StringComparison.OrdinalIgnoreCase));
         if (file is null) return;
 
-        _previewCancellation?.Cancel();
-        _previewCancellation?.Dispose();
         _previewCancellation = new CancellationTokenSource();
         var token = _previewCancellation.Token;
         try
@@ -338,6 +472,15 @@ public partial class MainWindow : Window
             var content = await _remote.ReadAsync(_settings.Connection, file, token);
             if (token.IsCancellationRequested) return;
             if (content.Binary is null) return;
+            if (string.Equals(Path.GetExtension(file.RelativePath), ".gif", StringComparison.OrdinalIgnoreCase))
+            {
+                StartGifAnimation(content.Binary);
+                StickerStatusText.Text = _gifFrames.Count > 1
+                    ? $"正在播放 GIF 动画 · {_gifFrames.Count} 帧"
+                    : "GIF 只有一帧，按静态图片显示。";
+                return;
+            }
+
             using var stream = new MemoryStream(content.Binary);
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
@@ -351,6 +494,71 @@ public partial class MainWindow : Window
         catch (Exception ex) { StickerStatusText.Text = $"图片读取失败：{ex.Message}"; }
     }
 
+    private void StartGifAnimation(byte[] data)
+    {
+        StopGifAnimation();
+        using var stream = new MemoryStream(data);
+        var decoder = new GifBitmapDecoder(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+        var frames = decoder.Frames.Cast<BitmapFrame>().ToArray();
+        if (frames.Length == 0) throw new InvalidDataException("GIF 文件没有可播放的帧。");
+
+        foreach (var frame in frames)
+            if (frame.CanFreeze) frame.Freeze();
+
+        _gifFrames = frames;
+        _gifDelays = frames.Select(ReadGifFrameDelay).ToArray();
+        _gifFrameIndex = 0;
+        StickerPreviewImage.Source = _gifFrames[0];
+        if (frames.Length < 2) return;
+
+        _gifTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = _gifDelays[0] };
+        _gifTimer.Tick += GifTimer_Tick;
+        _gifTimer.Start();
+    }
+
+    private static TimeSpan ReadGifFrameDelay(BitmapFrame frame)
+    {
+        try
+        {
+            if (frame.Metadata is BitmapMetadata metadata)
+            {
+                var value = metadata.GetQuery("/grctlext/Delay");
+                var hundredths = value switch
+                {
+                    ushort number => (int)number,
+                    short number when number >= 0 => number,
+                    uint number when number <= ushort.MaxValue => (int)number,
+                    byte number => number,
+                    _ => 0
+                };
+                if (hundredths > 0)
+                    return TimeSpan.FromMilliseconds(Math.Max(20, hundredths * 10));
+            }
+        }
+        catch (Exception) { }
+        return TimeSpan.FromMilliseconds(100);
+    }
+
+    private void GifTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_gifFrames.Count < 2 || _gifTimer is null) return;
+        _gifFrameIndex = (_gifFrameIndex + 1) % _gifFrames.Count;
+        StickerPreviewImage.Source = _gifFrames[_gifFrameIndex];
+        _gifTimer.Interval = _gifDelays[_gifFrameIndex];
+    }
+
+    private void StopGifAnimation()
+    {
+        if (_gifTimer is not null)
+        {
+            _gifTimer.Stop();
+            _gifTimer.Tick -= GifTimer_Tick;
+            _gifTimer = null;
+        }
+        _gifFrames = [];
+        _gifDelays = [];
+        _gifFrameIndex = 0;
+    }
     private async void SaveSticker_Click(object sender, RoutedEventArgs e)
     {
         StickerGrid.CommitEdit(DataGridEditingUnit.Cell, true);
@@ -596,17 +804,25 @@ public partial class MainWindow : Window
         try { StickerGrid.CommitEdit(DataGridEditingUnit.Cell, true); StickerGrid.CommitEdit(DataGridEditingUnit.Row, true); }
         catch { }
         var hasStickerDraft = HasStickerDraft();
-        if (!hasMemoryDraft && !hasStickerDraft) return;
-        var result = MessageBox.Show(this,
-            "还有未保存的记忆或标签修改。确定放弃并关闭吗？",
-            "存在未保存内容", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (result != MessageBoxResult.Yes) e.Cancel = true;
+        if (hasMemoryDraft || hasStickerDraft)
+        {
+            var result = MessageBox.Show(this,
+                "还有未保存的记忆或标签修改。确定放弃并关闭吗？",
+                "存在未保存内容", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (result != MessageBoxResult.Yes) { e.Cancel = true; return; }
+        }
+
+        StopGifAnimation();
+        _previewCancellation?.Cancel();
+        _previewCancellation?.Dispose();
+        _previewCancellation = null;
     }
     private void SetBusy(bool busy)
     {
         _busy = busy;
         ConnectButton.IsEnabled = !busy;
         RefreshButton.IsEnabled = !busy && _files.Count > 0;
+        BackupButton.IsEnabled = !busy && _serverConnected;
         SaveMemoryButton.IsEnabled = !busy && _memoryEditing &&
             !string.Equals(MemoryEditor.Text, _memoryOriginalText, StringComparison.Ordinal);
         SaveStickerButton.IsEnabled = !busy && _catalog is not null && _catalogFile is not null && _manifestFile is not null;

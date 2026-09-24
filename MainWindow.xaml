@@ -5,19 +5,38 @@
         Icon="/OpenClawDebugger;component/Assets/OpenClawDebugger.ico"
         Width="1360" Height="900" MinWidth="1120" MinHeight="720"
         WindowStartupLocation="CenterScreen"
-        Background="#0B1020"
-        Foreground="#E7ECF5"
+        Background="{DynamicResource Tone_0B1020}"
+        Foreground="{DynamicResource Tone_E7ECF5}"
         FontFamily="Segoe UI"
         Loaded="Window_Loaded" Closing="Window_Closing">
     <Window.Resources>
-        <SolidColorBrush x:Key="PanelBrush" Color="#111A2B"/>
-        <SolidColorBrush x:Key="PanelBorderBrush" Color="#253149"/>
-        <SolidColorBrush x:Key="MutedBrush" Color="#92A0B7"/>
-        <SolidColorBrush x:Key="AccentBrush" Color="#72A7FF"/>
+        <SolidColorBrush x:Key="Tone_0A0F19" Color="#0A0F19"/>
+        <SolidColorBrush x:Key="Tone_0B1020" Color="#0B1020"/>
+        <SolidColorBrush x:Key="Tone_0D1524" Color="#0D1524"/>
+        <SolidColorBrush x:Key="Tone_0F1828" Color="#0F1828"/>
+        <SolidColorBrush x:Key="Tone_111A2B" Color="#111A2B"/>
+        <SolidColorBrush x:Key="Tone_132039" Color="#132039"/>
+        <SolidColorBrush x:Key="Tone_172338" Color="#172338"/>
+        <SolidColorBrush x:Key="Tone_1B2940" Color="#1B2940"/>
+        <SolidColorBrush x:Key="Tone_202B3D" Color="#202B3D"/>
+        <SolidColorBrush x:Key="Tone_253149" Color="#253149"/>
+        <SolidColorBrush x:Key="Tone_263A59" Color="#263A59"/>
+        <SolidColorBrush x:Key="Tone_2765C8" Color="#2765C8"/>
+        <SolidColorBrush x:Key="Tone_294267" Color="#294267"/>
+        <SolidColorBrush x:Key="Tone_33445F" Color="#33445F"/>
+        <SolidColorBrush x:Key="Tone_3B6DB0" Color="#3B6DB0"/>
+        <SolidColorBrush x:Key="Tone_3B80E8" Color="#3B80E8"/>
+        <SolidColorBrush x:Key="Tone_72A7FF" Color="#72A7FF"/>
+        <SolidColorBrush x:Key="Tone_92A0B7" Color="#92A0B7"/>
+        <SolidColorBrush x:Key="Tone_AFC0D9" Color="#AFC0D9"/>
+        <SolidColorBrush x:Key="Tone_B8C7DC" Color="#B8C7DC"/>
+        <SolidColorBrush x:Key="Tone_D2B984" Color="#D2B984"/>
+        <SolidColorBrush x:Key="Tone_E7ECF5" Color="#E7ECF5"/>
+        <SolidColorBrush x:Key="Tone_FFFFFF" Color="#FFFFFF"/>
         <Style TargetType="Button">
-            <Setter Property="Background" Value="#1B2940"/>
-            <Setter Property="Foreground" Value="#E7ECF5"/>
-            <Setter Property="BorderBrush" Value="#33445F"/>
+            <Setter Property="Background" Value="{DynamicResource Tone_1B2940}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_E7ECF5}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_33445F}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="13,8"/>
             <Setter Property="Margin" Value="0,0,8,0"/>
@@ -26,13 +45,22 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" Padding="{TemplateBinding Padding}">
+                        <Border x:Name="ButtonChrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+                            <Border.RenderTransform><ScaleTransform x:Name="HoverScale" ScaleX="1" ScaleY="1"/></Border.RenderTransform>
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Background" Value="#263A59"/>
+                                <Setter Property="Background" Value="{DynamicResource Tone_263A59}"/>
+                                <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverScale" Storyboard.TargetProperty="ScaleX" To="1.035" Duration="0:0:0.13"/>
+                                    <DoubleAnimation Storyboard.TargetName="HoverScale" Storyboard.TargetProperty="ScaleY" To="1.035" Duration="0:0:0.13"/>
+                                </Storyboard></BeginStoryboard></Trigger.EnterActions>
+                                <Trigger.ExitActions><BeginStoryboard><Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverScale" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.16"/>
+                                    <DoubleAnimation Storyboard.TargetName="HoverScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.16"/>
+                                </Storyboard></BeginStoryboard></Trigger.ExitActions>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.45"/>
@@ -43,55 +71,248 @@
             </Setter>
         </Style>
         <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Background" Value="#2765C8"/>
-            <Setter Property="BorderBrush" Value="#3B80E8"/>
+            <Setter Property="Background" Value="{DynamicResource Tone_2765C8}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_3B80E8}"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="#0D1524"/>
-            <Setter Property="Foreground" Value="#E7ECF5"/>
-            <Setter Property="BorderBrush" Value="#33445F"/>
+            <Setter Property="Background" Value="{DynamicResource Tone_0D1524}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_E7ECF5}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_33445F}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10,8"/>
-            <Setter Property="CaretBrush" Value="#FFFFFF"/>
-            <Setter Property="SelectionBrush" Value="#3B6DB0"/>
+            <Setter Property="CaretBrush" Value="{DynamicResource Tone_FFFFFF}"/>
+            <Setter Property="SelectionBrush" Value="{DynamicResource Tone_3B6DB0}"/>
+
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="BorderBrush" Value="{DynamicResource Tone_72A7FF}"/>
+                    <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.94" Duration="0:0:0.12"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                    <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+                </Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource Tone_72A7FF}"/></Trigger>
+            </Style.Triggers>
         </Style>
         <Style TargetType="DataGrid">
-            <Setter Property="Background" Value="#0D1524"/>
-            <Setter Property="Foreground" Value="#E7ECF5"/>
-            <Setter Property="BorderBrush" Value="#253149"/>
+            <Setter Property="Background" Value="{DynamicResource Tone_0D1524}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_E7ECF5}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_253149}"/>
             <Setter Property="GridLinesVisibility" Value="Horizontal"/>
-            <Setter Property="HorizontalGridLinesBrush" Value="#202B3D"/>
-            <Setter Property="VerticalGridLinesBrush" Value="#202B3D"/>
-            <Setter Property="RowBackground" Value="#111A2B"/>
-            <Setter Property="AlternatingRowBackground" Value="#0F1828"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource Tone_202B3D}"/>
+            <Setter Property="VerticalGridLinesBrush" Value="{DynamicResource Tone_202B3D}"/>
+            <Setter Property="RowBackground" Value="{DynamicResource Tone_111A2B}"/>
+            <Setter Property="AlternatingRowBackground" Value="{DynamicResource Tone_0F1828}"/>
             <Setter Property="HeadersVisibility" Value="Column"/>
             <Setter Property="CanUserAddRows" Value="False"/>
             <Setter Property="CanUserDeleteRows" Value="False"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
         </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="{DynamicResource Tone_0D1524}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_E7ECF5}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_33445F}"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="BorderBrush" Value="{DynamicResource Tone_72A7FF}"/>
+                    <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.94" Duration="0:0:0.12"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                    <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="{DynamicResource Tone_0D1524}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_E7ECF5}"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource Tone_263A59}"/>
+                    <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.88" Duration="0:0:0.1"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                    <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource Tone_263A59}"/>
+                    <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.88" Duration="0:0:0.1"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                    <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="DataGridRow">
+            <Setter Property="Background" Value="{DynamicResource Tone_111A2B}"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource Tone_263A59}"/>
+                    <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.9" Duration="0:0:0.1"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                    <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
         <Style TargetType="DataGridColumnHeader">
-            <Setter Property="Background" Value="#172338"/>
-            <Setter Property="Foreground" Value="#AFC0D9"/>
+            <Setter Property="Background" Value="{DynamicResource Tone_172338}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_AFC0D9}"/>
             <Setter Property="Padding" Value="10,9"/>
-            <Setter Property="BorderBrush" Value="#253149"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_253149}"/>
+        </Style>
+        <Style x:Key="NavigationTabControl" TargetType="TabControl">
+            <Setter Property="Background" Value="{DynamicResource Tone_111A2B}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_253149}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabControl">
+                        <Grid ClipToBounds="False" KeyboardNavigation.TabNavigation="Local">
+                            <Border Margin="0,44,0,0"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="0,12,12,12"
+                                    SnapsToDevicePixels="True">
+                                <ContentPresenter x:Name="PART_SelectedContentHost"
+                                                  ContentSource="SelectedContent"
+                                                  Margin="0"
+                                                  SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                            </Border>
+                            <TabPanel x:Name="HeaderPanel"
+                                      IsItemsHost="True"
+                                      Margin="8,0,0,0"
+                                      Panel.ZIndex="1"
+                                      KeyboardNavigation.TabIndex="0"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style TargetType="TabItem">
-            <Setter Property="Foreground" Value="#AFC0D9"/>
-            <Setter Property="Padding" Value="20,11"/>
-            <Setter Property="Background" Value="#111A2B"/>
-            <Setter Property="BorderBrush" Value="#253149"/>
+            <Setter Property="Foreground" Value="{DynamicResource Tone_AFC0D9}"/>
+            <Setter Property="Background" Value="{DynamicResource Tone_1B2940}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Tone_33445F}"/>
+            <Setter Property="Width" Value="160"/>
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="-10,0,-10,-1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Panel.ZIndex" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Grid x:Name="TabChrome" RenderTransformOrigin="0.5,1">
+                            <Grid.RenderTransform>
+                                <TranslateTransform x:Name="TabOffset" Y="0"/>
+                            </Grid.RenderTransform>
+                            <Path x:Name="TabShape"
+                                  Data="M 24,0 L 160,0 L 136,46 L 0,46 Z"
+                                  Fill="{TemplateBinding Background}"
+                                  Stroke="{TemplateBinding BorderBrush}"
+                                  StrokeThickness="1"
+                                  Stretch="Fill"
+                                  RenderTransformOrigin="0.5,1">
+                                <Path.RenderTransform>
+                                    <ScaleTransform x:Name="TabScale" ScaleX="1" ScaleY="1"/>
+                                </Path.RenderTransform>
+                            </Path>
+                            <ContentPresenter ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="18,0,18,3"
+                                              RecognizesAccessKey="True"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="TabShape" Property="Data"
+                                        Value="M 18,0 Q 8,0 6,10 L 0,46 L 160,46 L 154,10 Q 152,0 142,0 Z"/>
+                                <Setter TargetName="TabShape" Property="Fill" Value="{DynamicResource Tone_2765C8}"/>
+                                <Setter TargetName="TabShape" Property="Stroke" Value="{DynamicResource Tone_3B80E8}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource Tone_FFFFFF}"/>
+                                <Setter Property="Panel.ZIndex" Value="3"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="TabOffset"
+                                                             Storyboard.TargetProperty="Y"
+                                                             From="5" To="-2" Duration="0:0:0.22">
+                                                <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="TabScale"
+                                                             Storyboard.TargetProperty="ScaleY"
+                                                             From="0.92" To="1" Duration="0:0:0.22">
+                                                <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabShape" Property="Fill" Value="{DynamicResource Tone_263A59}"/>
+                                <Setter TargetName="TabShape" Property="Stroke" Value="{DynamicResource Tone_72A7FF}"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="TabOffset"
+                                                             Storyboard.TargetProperty="Y"
+                                                             To="-4" Duration="0:0:0.14">
+                                                <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="TabScale"
+                                                             Storyboard.TargetProperty="ScaleY"
+                                                             To="1.04" Duration="0:0:0.14"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="TabOffset"
+                                                             Storyboard.TargetProperty="Y"
+                                                             To="0" Duration="0:0:0.18"/>
+                                            <DoubleAnimation Storyboard.TargetName="TabScale"
+                                                             Storyboard.TargetProperty="ScaleY"
+                                                             To="1" Duration="0:0:0.18"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="TabShape" Property="Stroke" Value="{DynamicResource Tone_72A7FF}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
-    <Grid Margin="18">
+    <Grid>
+        <Image x:Name="ThemeBackdropImage"
+               Stretch="UniformToFill"
+               Opacity="0.9"
+               IsHitTestVisible="False"
+               Visibility="Collapsed">
+            <Image.Effect>
+                <BlurEffect Radius="2" RenderingBias="Performance"/>
+            </Image.Effect>
+        </Image>
+        <Border x:Name="ThemeBackdropWash"
+                Background="#FFFDF8"
+                Opacity="0.25"
+                IsHitTestVisible="False"
+                Visibility="Collapsed"/>
+        <Grid Margin="18" Background="Transparent">
         <Grid.RowDefinitions>
             <RowDefinition Height="72"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="42"/>
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="#111A2B" BorderBrush="#253149" BorderThickness="1" CornerRadius="12" Padding="18,10">
+        <Border Grid.Row="0" Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="12" Padding="18,10">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -100,44 +321,45 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="OpenClaw Debugger" FontSize="21" FontWeight="SemiBold"/>
-                    <TextBlock Text="本地连接 · 只读扫描 · 受控编辑" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,3,0,0"/>
+                    <TextBlock Text="本地连接 · 只读扫描 · 受控编辑" Foreground="{DynamicResource Tone_92A0B7}" FontSize="12" Margin="0,3,0,0"/>
                 </StackPanel>
-                <Border Grid.Column="1" Background="#0D1524" BorderBrush="#253149" BorderThickness="1" CornerRadius="8" Padding="12,8" Margin="0,0,12,0" VerticalAlignment="Center">
-                    <TextBlock x:Name="ConnectionStatusText" Text="尚未连接" Foreground="#AFC0D9" FontSize="12"/>
+                <Border Grid.Column="1" Background="{DynamicResource Tone_0D1524}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="8" Padding="12,8" Margin="0,0,12,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="ConnectionStatusText" Text="尚未连接" Foreground="{DynamicResource Tone_AFC0D9}" FontSize="12"/>
                 </Border>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="RefreshButton" Content="重新扫描" Click="Refresh_Click" IsEnabled="False"/>
+                    <Button x:Name="BackupButton" Content="备份服务器" Click="BackupServer_Click" IsEnabled="False" ToolTip="将服务器 / 根文件系统打包为快照（需要免密 sudo tar）"/>
                     <Button x:Name="ConnectButton" Content="连接服务器" Style="{StaticResource PrimaryButton}" Click="Connect_Click"/>
                 </StackPanel>
             </Grid>
         </Border>
 
-        <TabControl x:Name="MainTabs" Grid.Row="1" Margin="0,14,0,8" Background="#111A2B" BorderBrush="#253149">
+        <TabControl x:Name="MainTabs" Style="{StaticResource NavigationTabControl}" Grid.Row="1" Margin="0,14,0,8">
             <TabItem Header="概览">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="24">
                         <TextBlock Text="项目管理台" FontSize="25" FontWeight="SemiBold"/>
                         <TextBlock Text="连接服务器后读取工作区 Markdown 与表情包目录。保存操作会先检查远程版本，并在本机生成加密回滚快照。"
-                                   Foreground="{StaticResource MutedBrush}" FontSize="14" TextWrapping="Wrap" Margin="0,8,0,22"/>
+                                   Foreground="{DynamicResource Tone_92A0B7}" FontSize="14" TextWrapping="Wrap" Margin="0,8,0,22"/>
                         <UniformGrid Columns="3" Margin="0,0,0,18">
-                            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,12,0">
-                                <StackPanel><TextBlock Text="记忆文件" Foreground="{StaticResource MutedBrush}"/><TextBlock x:Name="MemoryCountText" Text="—" FontSize="26" FontWeight="SemiBold" Margin="0,8,0,0"/></StackPanel>
+                            <Border Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,12,0">
+                                <StackPanel><TextBlock Text="记忆文件" Foreground="{DynamicResource Tone_92A0B7}"/><TextBlock x:Name="MemoryCountText" Text="—" FontSize="26" FontWeight="SemiBold" Margin="0,8,0,0"/></StackPanel>
                             </Border>
-                            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,12,0">
-                                <StackPanel><TextBlock Text="表情包图片" Foreground="{StaticResource MutedBrush}"/><TextBlock x:Name="StickerCountText" Text="—" FontSize="26" FontWeight="SemiBold" Margin="0,8,0,0"/></StackPanel>
+                            <Border Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,12,0">
+                                <StackPanel><TextBlock Text="表情包图片" Foreground="{DynamicResource Tone_92A0B7}"/><TextBlock x:Name="StickerCountText" Text="—" FontSize="26" FontWeight="SemiBold" Margin="0,8,0,0"/></StackPanel>
                             </Border>
-                            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="18">
-                                <StackPanel><TextBlock Text="本机回滚快照" Foreground="{StaticResource MutedBrush}"/><TextBlock x:Name="SnapshotPathText" Text="—" FontSize="13" TextWrapping="Wrap" Margin="0,8,0,0"/></StackPanel>
+                            <Border Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="10" Padding="18">
+                                <StackPanel><TextBlock Text="本机回滚快照" Foreground="{DynamicResource Tone_92A0B7}"/><TextBlock x:Name="SnapshotPathText" Text="—" FontSize="13" TextWrapping="Wrap" Margin="0,8,0,0"/></StackPanel>
                             </Border>
                         </UniformGrid>
-                        <Border Background="#132039" BorderBrush="#294267" BorderThickness="1" CornerRadius="10" Padding="18">
+                        <Border Background="{DynamicResource Tone_132039}" BorderBrush="{DynamicResource Tone_294267}" BorderThickness="1" CornerRadius="10" Padding="18">
                             <StackPanel>
                                 <TextBlock Text="安全说明" FontWeight="SemiBold" FontSize="15"/>
                                 <TextBlock Text="连接使用 Windows OpenSSH 当前配置和身份。应用不保存 SSH 私钥、不开放服务器端口，也不读取 OpenClaw 数据库。记忆和贴图元数据只在需要时读取到内存；保存前的原内容以 Windows DPAPI 加密后写入 OpenClaw-Debugger-Private。"
-                                           TextWrapping="Wrap" Foreground="#B8C7DC" Margin="0,8,0,0"/>
+                                           TextWrapping="Wrap" Foreground="{DynamicResource Tone_B8C7DC}" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
-                        <TextBlock x:Name="RootPathsText" Text="工作区和贴图库路径将在连接后显示。" Foreground="{StaticResource MutedBrush}" Margin="0,18,0,0" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="RootPathsText" Text="工作区和贴图库路径将在连接后显示。" Foreground="{DynamicResource Tone_92A0B7}" Margin="0,18,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -149,25 +371,25 @@
                         <ColumnDefinition Width="14"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <Border Grid.Column="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="10">
+                    <Border Grid.Column="0" Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="9" Padding="10">
                         <DockPanel>
                             <StackPanel DockPanel.Dock="Top" Margin="4,3,4,10">
                                 <TextBlock Text="工作区 Markdown" FontSize="15" FontWeight="SemiBold"/>
-                                <TextBlock Text="MEMORY.md、USER.md 和 memory/*.md" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0"/>
+                                <TextBlock Text="MEMORY.md、USER.md 和 memory/*.md" Foreground="{DynamicResource Tone_92A0B7}" FontSize="11" Margin="0,4,0,0"/>
                             </StackPanel>
                             <ListBox x:Name="MemoryFilesList" SelectionChanged="MemoryFilesList_SelectionChanged"
-                                     Background="Transparent" BorderThickness="0" Foreground="#E7ECF5"
+                                     Background="Transparent" BorderThickness="0" Foreground="{DynamicResource Tone_E7ECF5}"
                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                         </DockPanel>
                     </Border>
-                    <Border Grid.Column="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="14">
+                    <Border Grid.Column="2" Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="9" Padding="14">
                         <Grid>
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                             <Grid Grid.Row="0" Margin="0,0,0,12">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <TextBlock x:Name="MemoryFileTitle" Text="选择左侧文件" FontSize="17" FontWeight="SemiBold"/>
-                                    <TextBlock x:Name="MemoryFileInfo" Text="远程修改时间、大小与哈希将在读取后显示。" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0"/>
+                                    <TextBlock x:Name="MemoryFileInfo" Text="远程修改时间、大小与哈希将在读取后显示。" Foreground="{DynamicResource Tone_92A0B7}" FontSize="11" Margin="0,4,0,0"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                     <Button x:Name="EditMemoryButton" Content="编辑" Click="EditMemory_Click" IsEnabled="False"/>
@@ -191,13 +413,13 @@
                         <ColumnDefinition Width="14"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <Border Grid.Column="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12">
+                    <Border Grid.Column="0" Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="9" Padding="12">
                         <DockPanel>
                             <Grid DockPanel.Dock="Top" Margin="2,0,2,10">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <TextBlock Text="标签目录" FontSize="16" FontWeight="SemiBold"/>
-                                    <TextBlock Text="逗号分隔标签；保存时同步 catalog.json 和 MANIFEST.md" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0"/>
+                                    <TextBlock Text="逗号分隔标签；保存时同步 catalog.json 和 MANIFEST.md" Foreground="{DynamicResource Tone_92A0B7}" FontSize="11" Margin="0,4,0,0"/>
                                 </StackPanel>
                                 <Button x:Name="SaveStickerButton" Grid.Column="1" Content="保存标签" Style="{StaticResource PrimaryButton}" Click="SaveSticker_Click" IsEnabled="False"/>
                             </Grid>
@@ -211,17 +433,17 @@
                             </DataGrid>
                         </DockPanel>
                     </Border>
-                    <Border Grid.Column="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="14">
+                    <Border Grid.Column="2" Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="9" Padding="14">
                         <DockPanel>
                             <StackPanel DockPanel.Dock="Top">
                                 <TextBlock x:Name="StickerPreviewTitle" Text="贴图预览" FontSize="16" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="StickerStatusText" Text="连接后读取目录和标签格式。" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,5,0,10"/>
+                                <TextBlock x:Name="StickerStatusText" Text="连接后读取目录和标签格式。" Foreground="{DynamicResource Tone_92A0B7}" TextWrapping="Wrap" Margin="0,5,0,10"/>
                             </StackPanel>
                             <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
-                                <TextBlock x:Name="StickerPreviewTags" Text="" Foreground="#B8C7DC" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                <TextBlock x:Name="StickerPreviewTags" Text="" Foreground="{DynamicResource Tone_B8C7DC}" TextWrapping="Wrap" Margin="0,0,0,8"/>
                                 <Button Content="高级编辑原始标签文件" Click="OpenRawStickerFiles_Click" HorizontalAlignment="Left"/>
                             </StackPanel>
-                            <Border Background="#0A0F19" BorderBrush="#253149" BorderThickness="1" CornerRadius="8" MinHeight="240">
+                            <Border Background="{DynamicResource Tone_0A0F19}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="8" MinHeight="240">
                                 <Image x:Name="StickerPreviewImage" Stretch="Uniform" Margin="8"/>
                             </Border>
                         </DockPanel>
@@ -229,12 +451,39 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="主题">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="26" MaxWidth="760" HorizontalAlignment="Left">
+                        <TextBlock Text="界面主题" FontSize="22" FontWeight="SemiBold"/>
+                        <TextBlock Text="选择主题并即时预览。Atri 与洛茜会使用对应插画作为柔焦背景，设置自动保存在本机。" Foreground="{DynamicResource Tone_92A0B7}" TextWrapping="Wrap" Margin="0,7,0,22"/>
+                        <TextBlock Text="选择主题" Margin="0,0,0,6"/>
+                        <ComboBox x:Name="ThemeSelector" Width="260" HorizontalAlignment="Left" SelectedValuePath="Tag" SelectionChanged="ThemeSelector_SelectionChanged">
+                            <ComboBoxItem Content="Atri" Tag="Atri"/>
+                            <ComboBoxItem Content="浅色" Tag="Light"/>
+                            <ComboBoxItem Content="洛茜" Tag="Luoxi"/>
+                        </ComboBox>
+                        <TextBlock x:Name="ThemeStatusText" Text="主题切换会立即预览。" Foreground="{DynamicResource Tone_92A0B7}" Margin="0,12,0,20"/>
+                        <Border Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="10" Padding="18">
+                            <StackPanel>
+                                <TextBlock Text="预览" FontSize="16" FontWeight="SemiBold"/>
+                                <TextBlock Text="面板、编辑区、文字和强调色会随主题同步调整。" Foreground="{DynamicResource Tone_92A0B7}" TextWrapping="Wrap" Margin="0,8,0,14"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="悬停预览" Style="{StaticResource PrimaryButton}"/>
+                                    <Border Background="{DynamicResource Tone_0D1524}" BorderBrush="{DynamicResource Tone_33445F}" BorderThickness="1" CornerRadius="7" Padding="12,8">
+                                        <TextBlock Text="主题色样本" Foreground="{DynamicResource Tone_E7ECF5}"/>
+                                    </Border>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
             <TabItem Header="设置">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="26" MaxWidth="820" HorizontalAlignment="Left">
                         <TextBlock Text="连接与目录" FontSize="22" FontWeight="SemiBold"/>
                         <TextBlock Text="应用调用 Windows OpenSSH，并沿用当前用户的 SSH 配置、known_hosts 与身份代理；不会导入或复制私钥。"
-                                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,7,0,18"/>
+                                   Foreground="{DynamicResource Tone_92A0B7}" TextWrapping="Wrap" Margin="0,7,0,18"/>
                         <TextBlock Text="服务器地址" Margin="0,8,0,5"/>
                         <TextBox x:Name="HostBox"/>
                         <TextBlock Text="SSH 用户名" Margin="0,12,0,5"/>
@@ -255,14 +504,15 @@
                             <Button Content="连接并扫描" Click="Connect_Click"/>
                         </StackPanel>
                         <TextBlock Text="应用直接复用当前 Windows 用户运行 ssh admin@106.14.173.90 时使用的 OpenSSH 身份，不要求选择或输入密钥。主机指纹严格校验；未知或发生变化的主机密钥会被拒绝。"
-                                   Foreground="#D2B984" TextWrapping="Wrap" Margin="0,18,0,0"/>
+                                   Foreground="{DynamicResource Tone_D2B984}" TextWrapping="Wrap" Margin="0,18,0,0"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
         </TabControl>
 
-        <Border Grid.Row="2" Background="#111A2B" BorderBrush="#253149" BorderThickness="1" CornerRadius="8" Padding="12,6">
-            <TextBlock x:Name="StatusLine" Text="就绪" Foreground="#AFC0D9" VerticalAlignment="Center" FontSize="12"/>
+        <Border Grid.Row="2" Background="{DynamicResource Tone_111A2B}" BorderBrush="{DynamicResource Tone_253149}" BorderThickness="1" CornerRadius="8" Padding="12,6">
+            <TextBlock x:Name="StatusLine" Text="就绪" Foreground="{DynamicResource Tone_AFC0D9}" VerticalAlignment="Center" FontSize="12"/>
         </Border>
+        </Grid>
     </Grid>
 </Window>

@@ -11,5 +11,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\OpenClawDebugger.ico" />
+    <Resource Include="Assets\Backgrounds\Atri.jpg" />
+    <Resource Include="Assets\Backgrounds\Luoxi.jpg" />
   </ItemGroup>
 </Project>

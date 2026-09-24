@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.IO;
+using System.Security.Cryptography;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -26,7 +28,6 @@ MAX_IMAGE = 16 * 1024 * 1024
 def fail(message, code="remote_error"):
     print(json.dumps({"ok": False, "code": code, "error": message}, ensure_ascii=False))
     raise SystemExit(0)
-
 def safe_file(root_name, relative, write=False):
     if root_name not in ROOTS or not isinstance(relative, str):
         raise ValueError("无效的远程路径")
@@ -271,6 +272,127 @@ except Exception as e:
         var response = await InvokeAsync(settings, request, cancellationToken);
         return response["sha256"]?.GetValue<string>() ?? "";
     }
+    public async Task<RemoteSnapshotTransferResult> WriteServerSnapshotAsync(
+        ConnectionSettings settings,
+        Stream destination,
+        IProgress<long>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSettings(settings);
+        var start = new ProcessStartInfo
+        {
+            FileName = "ssh.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false)
+        };
+        start.ArgumentList.Add("-T");
+        start.ArgumentList.Add("-o");
+        start.ArgumentList.Add("BatchMode=yes");
+        start.ArgumentList.Add("-o");
+        start.ArgumentList.Add("StrictHostKeyChecking=yes");
+        start.ArgumentList.Add("-o");
+        start.ArgumentList.Add("ConnectTimeout=12");
+        start.ArgumentList.Add("-o");
+        start.ArgumentList.Add("LogLevel=ERROR");
+        start.ArgumentList.Add("-p");
+        start.ArgumentList.Add(settings.Port.ToString(CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(settings.Target);
+        start.ArgumentList.Add("sudo -n tar --create --gzip --file=- --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .");
+
+        using var process = new Process { StartInfo = start };
+        try
+        {
+            if (!process.Start())
+                throw new InvalidOperationException("无法启动 Windows OpenSSH。");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromHours(12));
+        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[256 * 1024];
+        long transferred = 0;
+        long lastReported = 0;
+        try
+        {
+            var gzipHeader = new byte[2];
+            var headerRead = 0;
+            while (headerRead < gzipHeader.Length)
+            {
+                var read = await process.StandardOutput.BaseStream.ReadAsync(
+                    gzipHeader.AsMemory(headerRead), timeout.Token);
+                if (read == 0)
+                    throw new InvalidDataException("服务器没有返回完整的 gzip 快照头。");
+                headerRead += read;
+            }
+            if (gzipHeader[0] != 0x1f || gzipHeader[1] != 0x8b)
+                throw new InvalidDataException("SSH 标准输出不是 gzip 快照数据；请检查服务器登录脚本是否向标准输出写入文本。");
+            await destination.WriteAsync(gzipHeader, timeout.Token);
+            hash.AppendData(gzipHeader);
+            transferred = gzipHeader.Length;
+
+            while (true)
+            {
+                var read = await process.StandardOutput.BaseStream.ReadAsync(buffer.AsMemory(), timeout.Token);
+                if (read == 0) break;
+                await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+                hash.AppendData(buffer, 0, read);
+                transferred += read;
+                if (transferred - lastReported >= 4 * 1024 * 1024)
+                {
+                    progress?.Report(transferred);
+                    lastReported = transferred;
+                }
+            }
+
+            await process.WaitForExitAsync(timeout.Token);
+            var error = await stderrTask;
+            if (process.ExitCode != 0)
+            {
+                var detail = string.Join(Environment.NewLine,
+                    error.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Take(8));
+                if (detail.Contains("Permission denied (", StringComparison.OrdinalIgnoreCase) ||
+                    detail.Contains("Permission denied, please try again", StringComparison.OrdinalIgnoreCase) ||
+                    detail.Contains("No supported authentication methods", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("当前 Windows OpenSSH 身份未通过服务器认证。请确认此 Windows 用户执行 ssh admin@106.14.173.90 能直接登录。");
+                if (detail.Contains("a password is required", StringComparison.OrdinalIgnoreCase) ||
+                    detail.Contains("a terminal is required", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("完整服务器快照需要 admin 对 tar 命令具备免密 sudo 权限；当前连接不能交互输入 sudo 密码。");
+                if (detail.Contains("Permission denied", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("完整服务器快照需要 admin 对 tar 命令具备 root 权限。");
+                if (detail.Contains("REMOTE HOST IDENTIFICATION HAS CHANGED", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("服务器 SSH 主机指纹发生变化，快照已取消。");
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+                    ? $"服务器快照失败，SSH 退出码 {process.ExitCode}。"
+                    : $"服务器快照失败：{detail}");
+            }
+
+            if (transferred == 0)
+                throw new InvalidDataException("服务器没有返回快照数据。");
+            progress?.Report(transferred);
+            return new RemoteSnapshotTransferResult(
+                transferred, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("服务器快照超过 12 小时，传输已中止。");
+        }
+        finally
+        {
+            if (!process.HasExited)
+                try { process.Kill(entireProcessTree: true); } catch { }
+        }
+    }
     private static async Task<JsonObject> InvokeAsync(
         ConnectionSettings settings, JsonObject request, CancellationToken cancellationToken)
     {
@@ -386,3 +508,4 @@ except Exception as e:
 }
 
 public sealed class RemoteConflictException(string message) : InvalidOperationException(message);
+public sealed record RemoteSnapshotTransferResult(long Bytes, string Sha256);

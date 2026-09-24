@@ -6,6 +6,8 @@ namespace OpenClawDebugger;
 
 public static class SettingsRepository
 {
+    public static string DefaultBackupDirectory => Path.Combine(DefaultPrivateDirectory, "OpenClaw-Server-Backup");
+
     public static string DefaultPrivateDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
         "ChatGPT", "Openclaw", "OpenClaw-Debugger-Private");
