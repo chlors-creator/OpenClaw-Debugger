@@ -6,6 +6,7 @@
   let requestId = 0;
   let toastTimer = 0;
   let dirtySyncTimer = 0;
+  let uploadInProgress = false;
   let currentTab = 'overview';
   let settings = { host: '106.14.173.90', username: 'admin', port: 22, workspacePath: '/home/admin/.openclaw/workspace', stickersPath: '/home/admin/.openclaw/workspace/stickers' };
   let memoryFiles = [];
@@ -24,6 +25,22 @@
   let blurValue = 2;
   let washValue = 25;
   let imageValue = 90;
+  const DEFAULT_PALETTES = {
+    Atri: { canvas:'#0a1415', surface:'#0f1d1b', ink:'#eef6f2', muted:'#a9bcb4', subtle:'#789087', accent:'#58d7c0', highlight:'#a5e8d4', buttonInk:'#102522', border:'#bee1d0', borderStrong:'#bee1d0', warm:'#efbd75', danger:'#ff8a83', wash:'#f5f9f4', memory:'#7ce0dd', sticker:'#ffa2a4', snapshot:'#f1c777' },
+    Luoxi: { canvas:'#1b1219', surface:'#281b24', ink:'#fff2f1', muted:'#d3b9bd', subtle:'#a28189', accent:'#ed8194', highlight:'#f6bdc3', buttonInk:'#311d24', border:'#f4cccc', borderStrong:'#f7c8cc', warm:'#f0ad67', danger:'#ff858c', wash:'#fff4ed', memory:'#89d4ce', sticker:'#ff9aab', snapshot:'#f0c477' },
+    Light: { canvas:'#eef3f8', surface:'#fbfdff', ink:'#1e2b36', muted:'#566779', subtle:'#758697', accent:'#397cc8', highlight:'#83afe4', buttonInk:'#ffffff', border:'#455e7a', borderStrong:'#397cc8', warm:'#a46b18', danger:'#bf443f', wash:'#f2f7fc', memory:'#327f8c', sticker:'#bd5969', snapshot:'#a46b18' }
+  };
+  const COLOR_FIELDS = [
+    { key:'canvas', css:'--palette-canvas', label:'界面底色' }, { key:'surface', css:'--palette-surface', label:'卡片与面板' },
+    { key:'ink', css:'--palette-ink', label:'主要文字' }, { key:'muted', css:'--palette-muted', label:'次级文字' },
+    { key:'subtle', css:'--palette-subtle', label:'弱化文字' }, { key:'accent', css:'--palette-accent', label:'主强调色' },
+    { key:'highlight', css:'--palette-highlight', label:'辅助强调色' }, { key:'buttonInk', css:'--palette-button-ink', label:'主按钮文字' },
+    { key:'border', css:'--palette-border', label:'边框颜色' }, { key:'borderStrong', css:'--palette-border-strong', label:'高亮边框' },
+    { key:'warm', css:'--palette-warm', label:'提示与暖色' }, { key:'danger', css:'--palette-danger', label:'错误与危险' },
+    { key:'wash', css:'--palette-wash', label:'背景泛白颜色' }, { key:'memory', css:'--palette-memory', label:'记忆图标色' },
+    { key:'sticker', css:'--palette-sticker', label:'表情包图标色' }, { key:'snapshot', css:'--palette-snapshot', label:'备份图标色' }
+  ];
+  let currentPalette = Object.assign({}, DEFAULT_PALETTES.Atri);
 
   function bridgeCall(command, payload) {
     return new Promise((resolve, reject) => {
@@ -57,14 +74,19 @@
   }
 
   function setBusy(busy) {
-    document.body.classList.toggle('busy', busy);
-    $('#connectButton').disabled = busy;
-    $('#refreshButton').disabled = busy || !memoryFiles.length;
-    $('#backupButton').disabled = busy || !$('.connection-chip').classList.contains('connected');
-    $('#settingsConnectButton').disabled = busy;
-    $('#saveSettingsButton').disabled = busy;
-    $('#saveMemoryButton').disabled = busy || !memoryEditing || !dirtyMemory;
-    $('#saveStickerButton').disabled = busy || !stickerEditingEnabled || !dirtyStickers;
+    const busyNow = Boolean(busy || uploadInProgress);
+    const connected = $('.connection-chip').classList.contains('connected');
+    document.body.classList.toggle('busy', busyNow);
+    $('#connectButton').disabled = busyNow;
+    $('#refreshButton').disabled = busyNow || !connected;
+    $('#backupButton').disabled = busyNow || !connected;
+    $('#settingsConnectButton').disabled = busyNow;
+    $('#saveSettingsButton').disabled = busyNow;
+    $('#saveMemoryButton').disabled = busyNow || !memoryEditing || !dirtyMemory;
+    $('#saveStickerButton').disabled = busyNow || !stickerEditingEnabled || !dirtyStickers;
+    const uploadReady = !busyNow && connected;
+    $('#pickStickerButton').disabled = !uploadReady;
+    $('#uploadDropzone').classList.toggle('disabled', !uploadReady);
   }
 
   function setStatus(text, isError) {
@@ -130,48 +152,74 @@
     $('#targetSummary').textContent = (settings.username || 'admin') + '@' + (settings.host || '106.14.173.90');
   }
 
+  function normalizeTheme(theme) {
+    return theme === 'Luoxi' || theme === '洛茜' ? 'Luoxi' : theme === 'Light' || theme === '浅色' ? 'Light' : 'Atri';
+  }
+
+  function loadThemePalette(theme) {
+    const base = Object.assign({}, DEFAULT_PALETTES[theme]);
+    try {
+      const saved = JSON.parse(localStorage.getItem('ocd-colors-' + theme) || '{}');
+      COLOR_FIELDS.forEach(field => { if (typeof saved[field.key] === 'string' && /^#[0-9a-f]{6}$/i.test(saved[field.key])) base[field.key] = saved[field.key]; });
+    } catch (_) { }
+    return base;
+  }
+
+  function applyPalette() {
+    COLOR_FIELDS.forEach(field => document.documentElement.style.setProperty(field.css, currentPalette[field.key]));
+    localStorage.setItem('ocd-colors-' + selectedTheme, JSON.stringify(currentPalette));
+    renderColorControls();
+    applyBackdrop();
+  }
+
+  function renderColorControls() {
+    const container = $('#colorControls');
+    if (!container) return;
+    container.replaceChildren();
+    COLOR_FIELDS.forEach(field => {
+      const label = document.createElement('label'); label.className = 'color-control';
+      const input = document.createElement('input'); input.type = 'color'; input.value = currentPalette[field.key]; input.setAttribute('aria-label', field.label);
+      const text = document.createElement('span');
+      const name = document.createElement('strong'); name.textContent = field.label;
+      const value = document.createElement('code'); value.textContent = currentPalette[field.key].toUpperCase();
+      input.addEventListener('input', () => {
+        currentPalette[field.key] = input.value.toLowerCase(); value.textContent = currentPalette[field.key].toUpperCase();
+        document.documentElement.style.setProperty(field.css, currentPalette[field.key]);
+        localStorage.setItem('ocd-colors-' + selectedTheme, JSON.stringify(currentPalette));
+        if (field.key === 'wash') applyBackdrop();
+      });
+      text.append(name, value); label.append(input, text); container.append(label);
+    });
+  }
+
   function applyTheme(theme) {
-    selectedTheme = theme || 'Atri';
-    document.body.classList.remove('theme-light', 'theme-luoxi');
-    if (selectedTheme === 'Light' || selectedTheme === '浅色') {
-      document.body.classList.add('theme-light');
-      $('#rootPathsText').style.color = '';
-    } else if (selectedTheme === 'Luoxi' || selectedTheme === '洛茜') {
-      document.body.classList.add('theme-luoxi');
-      document.documentElement.style.setProperty('--theme-image', "url('assets/Luoxi.jpg')");
-      document.documentElement.style.setProperty('--accent', '#ed8194');
-      document.documentElement.style.setProperty('--accent2', '#f6bdc3');
-      document.documentElement.style.setProperty('--accent-ink', '#311d24');
-      document.documentElement.style.setProperty('--surface', 'rgba(34,20,28,.69)');
-      document.documentElement.style.setProperty('--surface-strong', 'rgba(35,21,29,.93)');
-      document.documentElement.style.setProperty('--line', 'rgba(244,204,204,.16)');
-      document.documentElement.style.setProperty('--line-hi', 'rgba(247,200,204,.3)');
-    } else {
-      document.documentElement.style.setProperty('--theme-image', "url('assets/Atri.jpg')");
-      document.documentElement.style.setProperty('--accent', '#58d7c0');
-      document.documentElement.style.setProperty('--accent2', '#a5e8d4');
-      document.documentElement.style.setProperty('--accent-ink', '#102522');
-      document.documentElement.style.setProperty('--surface', 'rgba(15,29,27,.68)');
-      document.documentElement.style.setProperty('--surface-strong', 'rgba(17,34,31,.88)');
-      document.documentElement.style.setProperty('--line', 'rgba(190,225,208,.14)');
-      document.documentElement.style.setProperty('--line-hi', 'rgba(190,225,208,.28)');
-    }
-    $$('.theme-option').forEach(button => button.classList.toggle('active', button.dataset.theme === (selectedTheme === 'Luoxi' || selectedTheme === '洛茜' ? 'Luoxi' : selectedTheme === 'Light' || selectedTheme === '浅色' ? 'Light' : 'Atri')));
+    selectedTheme = normalizeTheme(theme);
+    document.body.classList.toggle('theme-light', selectedTheme === 'Light');
+    document.body.classList.toggle('theme-luoxi', selectedTheme === 'Luoxi');
+    const image = selectedTheme === 'Atri' ? "url('assets/Atri.jpg')" : selectedTheme === 'Luoxi' ? "url('assets/Luoxi.jpg')" : 'none';
+    document.documentElement.style.setProperty('--theme-image', image);
+    currentPalette = loadThemePalette(selectedTheme);
+    applyPalette();
+    $$('.theme-option').forEach(button => button.classList.toggle('active', button.dataset.theme === selectedTheme));
+  }
+  function hexToRgba(hex, opacity) {
+    const value = String(hex || '#f5f9f4').replace('#', '');
+    const safe = /^[0-9a-f]{6}$/i.test(value) ? value : 'f5f9f4';
+    const red = parseInt(safe.slice(0, 2), 16), green = parseInt(safe.slice(2, 4), 16), blue = parseInt(safe.slice(4, 6), 16);
+    return 'rgba(' + red + ',' + green + ',' + blue + ',' + opacity + ')';
   }
 
   function applyBackdrop() {
     document.documentElement.style.setProperty('--backdrop-blur', blurValue + 'px');
-    document.documentElement.style.setProperty('--wash-opacity', (washValue / 100).toFixed(2));
     document.documentElement.style.setProperty('--backdrop-opacity', (imageValue / 100).toFixed(2));
-    $('#blurOutput').value = blurValue + ' px';
-    $('#washOutput').value = washValue + '%';
-    $('#imageOutput').value = imageValue + '%';
-    $('#blurOutput').textContent = blurValue + ' px';
-    $('#washOutput').textContent = washValue + '%';
-    $('#imageOutput').textContent = imageValue + '%';
+    const washOpacity = (washValue / 100).toFixed(2);
+    const wash = $('.backdrop-wash');
+    wash.style.setProperty('--wash-opacity', washOpacity);
+    wash.style.backgroundColor = hexToRgba(currentPalette.wash || DEFAULT_PALETTES.Atri.wash, Number(washOpacity));
+    $('#blurOutput').value = blurValue + ' px'; $('#washOutput').value = washValue + '%'; $('#imageOutput').value = imageValue + '%';
+    $('#blurOutput').textContent = blurValue + ' px'; $('#washOutput').textContent = washValue + '%'; $('#imageOutput').textContent = imageValue + '%';
     localStorage.setItem('ocd-backdrop', JSON.stringify({ blur: blurValue, wash: washValue, image: imageValue }));
   }
-
   async function persistTheme(theme) {
     const normalized = theme === 'Luoxi' ? 'Luoxi' : theme === 'Light' ? 'Light' : 'Atri';
     applyTheme(normalized);
@@ -251,7 +299,7 @@
       const main = document.createElement('div'); main.className = 'sticker-row-main';
       const title = document.createElement('div'); title.className = 'sticker-row-title'; title.textContent = row.imagePath;
       const meta = document.createElement('div'); meta.className = 'sticker-row-meta'; meta.textContent = row.id + (row.tagsText ? ' · ' + row.tagsText : ' · 无标签');
-      const tags = document.createElement('input'); tags.className = 'sticker-tags-input'; tags.type = 'text'; tags.value = row.tagsText || ''; tags.placeholder = stickerEditingEnabled ? '输入标签…' : '标签只读'; tags.disabled = !stickerEditingEnabled; tags.setAttribute('aria-label', '标签 ' + row.imagePath);
+      const tags = document.createElement('input'); tags.className = 'sticker-tags-input'; tags.type = 'text'; tags.value = row.tagsText || ''; tags.placeholder = row.catalogued && stickerEditingEnabled ? '输入标签…' : '尚未登记目录'; tags.disabled = !stickerEditingEnabled || row.catalogued === false; tags.setAttribute('aria-label', '标签 ' + row.imagePath);
       tags.addEventListener('input', () => {
         row.tagsText = tags.value;
         meta.textContent = row.id + (tags.value ? ' · ' + tags.value : ' · 无标签');
@@ -379,6 +427,7 @@
       $('#rawStickerButton').disabled = !stickerEditingEnabled;
       $('#saveStickerButton').disabled = true;
       $('#refreshButton').disabled = false; $('#backupButton').disabled = false;
+      setBusy(false);
       renderMemoryList(); renderStickerList(); setDirtyState();
       setStatus('SSH 连接成功，已读取 ' + result.memoryCount + ' 个记忆文档和 ' + result.stickerCount + ' 张图片。');
       showToast('服务器连接成功。');
@@ -389,6 +438,65 @@
     }
   }
 
+  function encodeBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(offset, Math.min(offset + 32768, bytes.length)));
+    }
+    return btoa(binary);
+  }
+
+  async function uploadFiles(fileList) {
+    if (!$('.connection-chip').classList.contains('connected')) { showToast('请先连接服务器再上传。', true); return; }
+    if (dirtyMemory || dirtyStickers || dirtyRaw) { showToast('请先保存或放弃当前修改，再上传表情包。', true); return; }
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    if (files.length > 20) { showToast('一次最多上传 20 张图片。', true); return; }
+    const allowed = /\.(png|jpe?g|gif|webp|bmp)$/i;
+    for (const file of files) {
+      if (!allowed.test(file.name)) { showToast('不支持的图片格式：' + file.name, true); return; }
+      if (file.size < 1 || file.size > 16 * 1024 * 1024) { showToast('图片需小于等于 16 MiB：' + file.name, true); return; }
+    }
+    uploadInProgress = true;
+    setBusy(true);
+    const progress = $('#uploadProgress');
+    try {
+      for (const file of files) {
+        progress.textContent = '准备上传 ' + file.name;
+        const started = await bridgeCall('beginStickerUpload', { fileName: file.name, size: file.size });
+        try {
+          const buffer = await file.arrayBuffer();
+          const chunkSize = Number(started.chunkBytes) || 196608;
+          for (let offset = 0; offset < buffer.byteLength; offset += chunkSize) {
+            const chunk = buffer.slice(offset, Math.min(offset + chunkSize, buffer.byteLength));
+            await bridgeCall('appendStickerUpload', { uploadId: started.uploadId, contentBase64: encodeBase64(chunk) });
+            const percentage = Math.min(100, Math.round((offset + chunk.byteLength) / file.size * 100));
+            progress.textContent = '上传 ' + file.name + ' · ' + percentage + '%';
+          }
+          const result = await bridgeCall('commitStickerUpload', { uploadId: started.uploadId });
+          stickerRows = result.stickerFiles || stickerRows;
+          originalStickerRows = stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '' }));
+          stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
+          dirtyStickers = false;
+          $('#stickerCount').textContent = result.stickerCount;
+          $('#stickerListCount').textContent = stickerRows.length;
+          $('#saveStickerButton').disabled = !stickerEditingEnabled;
+          renderStickerList(); setDirtyState();
+          $('#stickerStatus').textContent = '图片已上传到服务器。新图片尚未登记标签条目；如需编辑其标签，请在“高级编辑原始文件”中将它加入 catalog.json 与 MANIFEST.md。';
+          setStatus('上传完成：' + result.fileName + ' · ' + sizeLabel(result.size));
+          progress.textContent = '已上传 ' + file.name;
+          const added = stickerRows.find(row => row.imagePath === result.fileName);
+          if (added) await selectSticker(added);
+        } catch (error) {
+          await bridgeCall('cancelStickerUpload', { uploadId: started.uploadId }).catch(() => {});
+          throw error;
+        }
+      }
+      showToast(files.length === 1 ? '表情包上传完成。' : '已上传 ' + files.length + ' 张表情包。');
+    } catch (error) { reportError(error); progress.textContent = '上传失败'; }
+    finally { uploadInProgress = false; setBusy(false); }
+  }
   async function backupServer() {
     if (!$('.connection-chip').classList.contains('connected')) return;
     $('#backupButton').disabled = true;
@@ -476,6 +584,28 @@
     $('#stickerSearch').addEventListener('input', renderStickerList);
     $('#saveStickerButton').addEventListener('click', saveStickerRows);
     $('#rawStickerButton').addEventListener('click', openRawEditor);
+    $('#resetColors').addEventListener('click', () => {
+      localStorage.removeItem('ocd-colors-' + selectedTheme);
+      applyTheme(selectedTheme);
+      showToast('已恢复此主题的默认颜色。');
+    });
+    const uploadZone = $('#uploadDropzone');
+    const uploadInput = $('#stickerFilesInput');
+    $('#pickStickerButton').addEventListener('click', event => { event.stopPropagation(); if (!$('#pickStickerButton').disabled) uploadInput.click(); });
+    uploadZone.addEventListener('click', event => { if (!event.target.closest('button') && !event.target.closest('input') && !uploadZone.classList.contains('disabled')) uploadInput.click(); });
+    uploadZone.addEventListener('keydown', event => { if ((event.key === 'Enter' || event.key === ' ') && !uploadZone.classList.contains('disabled')) { event.preventDefault(); uploadInput.click(); } });
+    uploadInput.addEventListener('change', () => { uploadFiles(uploadInput.files).finally(() => { uploadInput.value = ''; }); });
+    uploadZone.addEventListener('dragenter', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); uploadZone.classList.add('drop-active'); } });
+    uploadZone.addEventListener('dragover', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; uploadZone.classList.add('drop-active'); } });
+    uploadZone.addEventListener('dragleave', event => { if (!uploadZone.contains(event.relatedTarget)) uploadZone.classList.remove('drop-active'); });
+    uploadZone.addEventListener('drop', event => { if (event.dataTransfer && event.dataTransfer.files.length) { event.preventDefault(); event.stopPropagation(); uploadZone.classList.remove('drop-active'); uploadFiles(event.dataTransfer.files); } });
+    document.addEventListener('dragover', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault(); });
+    document.addEventListener('drop', event => {
+      if (!event.dataTransfer || !event.dataTransfer.files.length) return;
+      event.preventDefault();
+      if (currentTab === 'stickers' && !uploadZone.contains(event.target)) uploadFiles(event.dataTransfer.files);
+      else if (currentTab !== 'stickers') showToast('请先打开表情包页面再拖入图片。', true);
+    });
     $('#rawCatalog').addEventListener('input', () => { dirtyRaw = $('#rawCatalog').value !== originalCatalog || $('#rawManifest').value !== originalManifest; setDirtyState(); });
     $('#rawManifest').addEventListener('input', () => { dirtyRaw = $('#rawCatalog').value !== originalCatalog || $('#rawManifest').value !== originalManifest; setDirtyState(); });
     $('#rawSaveButton').addEventListener('click', event => { event.preventDefault(); saveRawEditor(); });

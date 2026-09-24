@@ -9,6 +9,8 @@ using System.Text.RegularExpressions;
 
 namespace OpenClawDebugger;
 
+public sealed record RemoteStickerUploadResult(string RelativePath, long Size, string Sha256);
+
 public sealed class RemoteOpenClawClient
 {
     private const string PythonProgram = """
@@ -180,6 +182,46 @@ def write_file():
             os.unlink(temporary)
     print(json.dumps({"ok": True, "sha256": sha(new_data), "size": len(new_data)}, separators=(",", ":")))
 
+def upload_image():
+    root_name = P.get("root")
+    filename = P.get("filename")
+    if root_name != "stickers" or not isinstance(filename, str):
+        fail("只允许上传到表情包目录", "bad_upload")
+    if not filename or filename in (".", "..") or "/" in filename or "\\" in filename or any(ord(c) < 32 for c in filename):
+        fail("文件名必须是单层文件名", "bad_upload")
+    if len(filename) > 180 or PurePosixPath(filename).suffix.lower() not in IMAGE_EXTS:
+        fail("仅允许 PNG、JPG、GIF、WEBP、BMP 图片，文件名最长 180 个字符", "bad_upload")
+    path = safe_file("stickers", filename)
+    if os.path.lexists(path):
+        fail("服务器已存在同名表情包，请先重命名本地文件", "conflict")
+    try:
+        data = base64.b64decode(P["content"], validate=True)
+    except Exception:
+        fail("上传内容不是有效的 Base64 图片", "bad_upload")
+    if not data or len(data) > MAX_IMAGE:
+        fail("图片为空或超过 16 MiB 限制", "too_large")
+    fd, temporary = tempfile.mkstemp(prefix=".openclaw-upload-", dir=ROOTS["stickers"])
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temporary, 0o644)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            fail("服务器已存在同名表情包，请先重命名本地文件", "conflict")
+        os.unlink(temporary)
+        try:
+            dfd = os.open(ROOTS["stickers"], os.O_DIRECTORY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except Exception:
+            pass
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(json.dumps({"ok": True, "relativePath": filename, "size": len(data), "sha256": sha(data)}, separators=(",", ":")))
 try:
     for root in ROOTS.values():
         if not os.path.isabs(root) or not os.path.isdir(root):
@@ -191,6 +233,8 @@ try:
         read_file()
     elif action == "write":
         write_file()
+    elif action == "upload":
+        upload_image()
     else:
         fail("不支持的操作")
 except SystemExit:
@@ -271,6 +315,22 @@ except Exception as e:
         };
         var response = await InvokeAsync(settings, request, cancellationToken);
         return response["sha256"]?.GetValue<string>() ?? "";
+    }
+    public async Task<RemoteStickerUploadResult> UploadStickerAsync(
+        ConnectionSettings settings, string fileName, byte[] bytes, CancellationToken cancellationToken = default)
+    {
+        var request = new JsonObject
+        {
+            ["action"] = "upload",
+            ["root"] = "stickers",
+            ["filename"] = fileName,
+            ["content"] = Convert.ToBase64String(bytes)
+        };
+        var response = await InvokeAsync(settings, request, cancellationToken);
+        return new RemoteStickerUploadResult(
+            response["relativePath"]?.GetValue<string>() ?? fileName,
+            response["size"]?.GetValue<long>() ?? bytes.LongLength,
+            response["sha256"]?.GetValue<string>() ?? "");
     }
     public async Task<RemoteSnapshotTransferResult> WriteServerSnapshotAsync(
         ConnectionSettings settings,
@@ -440,7 +500,7 @@ except Exception as e:
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        timeout.CancelAfter(TimeSpan.FromMinutes(3));
         var stdoutTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
         var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
         try

@@ -19,6 +19,9 @@ public partial class MainWindow : Window
 
     private readonly RemoteOpenClawClient _remote = new();
     private readonly Dictionary<string, RemoteFileContent> _loadedMemory = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, StickerUploadSession> _stickerUploads = new(StringComparer.Ordinal);
+    private const int StickerUploadLimit = 16 * 1024 * 1024;
+    private const int StickerUploadChunkLimit = 192 * 1024;
     private UserSettings _settings = new();
     private LocalSnapshotStore? _snapshots;
     private IReadOnlyList<RemoteFile> _files = [];
@@ -131,6 +134,14 @@ public partial class MainWindow : Window
                 return await SaveStickerRowsAsync(payload);
             case "saveStickerRaw":
                 return await SaveStickerRawAsync(payload);
+            case "beginStickerUpload":
+                return BeginStickerUpload(payload);
+            case "appendStickerUpload":
+                return AppendStickerUpload(payload);
+            case "commitStickerUpload":
+                return await CommitStickerUploadAsync(payload);
+            case "cancelStickerUpload":
+                return CancelStickerUpload(payload);
             case "backup":
                 return await BackupAsync();
             case "openBackupFolder":
@@ -233,7 +244,7 @@ public partial class MainWindow : Window
                 connectionStatus = "已连接 · " + memories.Count + " 个文档 · " + imagesCount + " 张图片",
                 memoryFiles = memories,
                 memoryCount = memories.Count,
-                stickerFiles = stickerRows,
+                stickerFiles = GetStickerUiRows(),
                 stickerCount = imagesCount,
                 stickerEditingEnabled = _catalog is not null && _catalogFile is not null && _manifestFile is not null,
                 catalogText = _catalogContent?.Text,
@@ -372,7 +383,7 @@ public partial class MainWindow : Window
             throw new InvalidOperationException("标签文件或快照存储未就绪。");
         var oldCatalog = _catalogContent;
         var oldManifest = _manifestContent;
-        if (updatedCatalog == oldCatalog.Text && updatedManifest == oldManifest.Text) return new { changed = false, snapshotCount = 0, stickerFiles = _catalog?.Rows.ToList(), stickerEditingEnabled = _catalog is not null, catalogText = oldCatalog.Text, manifestText = oldManifest.Text };
+        if (updatedCatalog == oldCatalog.Text && updatedManifest == oldManifest.Text) return new { changed = false, snapshotCount = 0, stickerFiles = GetStickerUiRows(), stickerEditingEnabled = _catalog is not null, catalogText = oldCatalog.Text, manifestText = oldManifest.Text };
         SetBusy(true);
         string? catalogNewHash = null;
         try
@@ -428,11 +439,108 @@ public partial class MainWindow : Window
             _manifestContent = oldManifest with { Text = updatedManifest, RawBytes = manifestBytes, Sha256 = manifestNewHash, Size = manifestBytes.Length, ModifiedUtc = DateTimeOffset.UtcNow };
             var images = _files.Where(x => x.Root == "stickers" && x.IsImage).ToList();
             StickerCatalogEditor.TryParse(updatedCatalog, images, out _catalog, out _);
-            return new { changed = true, snapshotCount, stickerFiles = _catalog?.Rows.ToList() ?? images.Select(x => new StickerRow { Id = Path.GetFileNameWithoutExtension(x.RelativePath), ImagePath = x.RelativePath }).ToList(), stickerEditingEnabled = _catalog is not null, catalogText = _catalogContent.Text, manifestText = _manifestContent.Text };
+            return new { changed = true, snapshotCount, stickerFiles = GetStickerUiRows(), stickerEditingEnabled = _catalog is not null, catalogText = _catalogContent.Text, manifestText = _manifestContent.Text };
         }
         finally { SetBusy(false); }
     }
 
+    private object BeginStickerUpload(JsonElement payload)
+    {
+        EnsureConnected();
+        if (_stickerUploads.Count >= 3) throw new InvalidOperationException("请先完成当前上传，再开始其他上传。");
+        var fileName = payload.GetProperty("fileName").GetString() ?? "";
+        var size = payload.GetProperty("size").GetInt64();
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(fileName) || fileName is "." or ".." ||
+            fileName.Length > 180 || fileName.Contains('/') || fileName.Contains('\\') ||
+            fileName.Any(char.IsControl) || fileName.EndsWith('.') || fileName.EndsWith(' ') ||
+            Path.GetFileName(fileName) != fileName)
+            throw new InvalidDataException("图片文件名无效；请使用单层文件名。 ");
+        if (extension is not (".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp"))
+            throw new InvalidDataException("仅支持 PNG、JPG、GIF、WEBP、BMP 图片。");
+        if (size is < 1 or > StickerUploadLimit) throw new InvalidDataException("每张图片大小需在 1 B 到 16 MiB 之间。");
+        if (_files.Any(x => x.Root == "stickers" && x.RelativePath.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
+            throw new IOException("表情包目录中已有同名文件，请先重命名图片。");
+        var id = Guid.NewGuid().ToString("N");
+        _stickerUploads[id] = new StickerUploadSession(fileName, size);
+        return new { uploadId = id, chunkBytes = StickerUploadChunkLimit };
+    }
+
+    private object AppendStickerUpload(JsonElement payload)
+    {
+        var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
+        if (!_stickerUploads.TryGetValue(uploadId, out var session)) throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
+        byte[] chunk;
+        try { chunk = Convert.FromBase64String(payload.GetProperty("contentBase64").GetString() ?? ""); }
+        catch (FormatException) { _stickerUploads.Remove(uploadId); session.Dispose(); throw new InvalidDataException("上传数据编码无效。"); }
+        if (chunk.Length is < 1 or > StickerUploadChunkLimit || session.Content.Length + chunk.Length > session.Size)
+        {
+            _stickerUploads.Remove(uploadId);
+            session.Dispose();
+            throw new InvalidDataException("上传分块大小或总长度超出限制。");
+        }
+        session.Content.Write(chunk, 0, chunk.Length);
+        return new { receivedBytes = session.Content.Length, totalBytes = session.Size };
+    }
+
+    private async Task<object> CommitStickerUploadAsync(JsonElement payload)
+    {
+        EnsureConnected();
+        var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
+        if (!_stickerUploads.Remove(uploadId, out var session)) throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
+        using (session)
+        {
+            if (session.Content.Length != session.Size) throw new InvalidDataException("上传内容长度不完整，请重新上传。");
+            var bytes = session.Content.ToArray();
+            if (!MatchesStickerImage(session.FileName, bytes)) throw new InvalidDataException("文件内容与扩展名不匹配，或图片格式不受支持。");
+            SetBusy(true);
+            try
+            {
+                var result = await _remote.UploadStickerAsync(_settings.Connection, session.FileName, bytes);
+                _files = _files.Append(new RemoteFile
+                {
+                    Root = "stickers", RelativePath = result.RelativePath, Kind = "image", Size = result.Size,
+                    Sha256 = result.Sha256, ModifiedUtc = DateTimeOffset.UtcNow, Editable = false
+                }).ToList();
+                var count = _files.Count(x => x.Root == "stickers" && x.IsImage);
+                return new { fileName = result.RelativePath, size = result.Size, sha256 = result.Sha256, stickerCount = count, stickerFiles = GetStickerUiRows(), stickerEditingEnabled = _catalog is not null };
+            }
+            finally { SetBusy(false); }
+        }
+    }
+
+    private object CancelStickerUpload(JsonElement payload)
+    {
+        var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
+        if (_stickerUploads.Remove(uploadId, out var session)) session.Dispose();
+        return new { cancelled = true };
+    }
+
+    private static bool MatchesStickerImage(string fileName, byte[] bytes)
+    {
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        return extension switch
+        {
+            ".png" => bytes.Length >= 8 && bytes.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+            ".jpg" or ".jpeg" => bytes.Length >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff,
+            ".gif" => bytes.Length >= 6 && (Encoding.ASCII.GetString(bytes, 0, 6) is "GIF87a" or "GIF89a"),
+            ".webp" => bytes.Length >= 12 && Encoding.ASCII.GetString(bytes, 0, 4) == "RIFF" && Encoding.ASCII.GetString(bytes, 8, 4) == "WEBP",
+            ".bmp" => bytes.Length >= 2 && bytes[0] == (byte)'B' && bytes[1] == (byte)'M',
+            _ => false
+        };
+    }
+
+    private List<StickerUiRow> GetStickerUiRows()
+    {
+        var rows = (_catalog?.Rows ?? []).Select(row => new StickerUiRow(row.Id, row.ImagePath, row.TagsText, true)).ToList();
+        var known = new HashSet<string>(rows.Select(x => x.ImagePath), StringComparer.OrdinalIgnoreCase);
+        foreach (var file in _files.Where(x => x.Root == "stickers" && x.IsImage))
+        {
+            if (known.Add(file.RelativePath))
+                rows.Add(new StickerUiRow(Path.GetFileNameWithoutExtension(file.RelativePath), file.RelativePath, "", false));
+        }
+        return rows;
+    }
     private async Task<object> BackupAsync()
     {
         EnsureConnected();
@@ -473,16 +581,26 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
-        if (_closingApproved) return;
-        if (_hasDrafts)
+        if (!_closingApproved && _hasDrafts)
         {
             var answer = MessageBox.Show(this, "还有未保存的记忆或标签修改。确定放弃并关闭吗？", "存在未保存内容", MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (answer != MessageBoxResult.Yes) e.Cancel = true;
         }
+        if (e.Cancel) return;
+        foreach (var session in _stickerUploads.Values) session.Dispose();
+        _stickerUploads.Clear();
     }
 
     private sealed record BridgeRequest(string Id, string Command, JsonElement Payload);
     private sealed record BridgeResponse(string Id, bool Ok, object? Data, string? Error);
     private sealed record BridgeEvent(string Type, string Command, object Data);
     private sealed record StickerEditRow(string Id, string ImagePath, string TagsText);
+    private sealed record StickerUiRow(string Id, string ImagePath, string TagsText, bool Catalogued);
+    private sealed class StickerUploadSession(string fileName, long size) : IDisposable
+    {
+        public string FileName { get; } = fileName;
+        public long Size { get; } = size;
+        public MemoryStream Content { get; } = new((int)size);
+        public void Dispose() => Content.Dispose();
+    }
 }

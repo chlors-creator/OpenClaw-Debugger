@@ -7,8 +7,8 @@ Windows 本地桌面管理工具。界面使用 HTML/CSS/JavaScript 构建，由
 - 通过本机 Windows OpenSSH 连接服务器，复用当前 Windows 用户的 SSH 配置、known_hosts 和登录身份。
 - 只读扫描 OpenClaw 工作区 Markdown、表情包目录及图片。
 - 浏览并编辑工作区记忆 Markdown 文件。保存前显示完整内容差异、重新读取远端并校验 SHA-256。
-- 预览贴图与原生 GIF 动图；标签编辑支持先预览 catalog.json 和 MANIFEST.md 的差异，再同步写入两份文件。
-- 可选择浅色、Atri、洛茜主题；Atri 与洛茜使用内置插画背景。背景模糊、泛白和图片可见度可在主题页即时调整并保存在本机浏览器配置中。
+- 预览贴图与原生 GIF 动图；标签编辑支持先预览 catalog.json 和 MANIFEST.md 的差异，再同步写入两份文件。支持拖放或选择 PNG、JPG、GIF、WEBP、BMP 图片上传到表情包目录；同名文件拒绝覆盖，单张最大 16 MiB。上传后若需编辑新图标签，可在高级编辑器中登记目录条目。
+- 可选择浅色、Atri、洛茜主题；Atri 与洛茜使用内置插画背景。背景模糊、泛白和图片可见度可在主题页即时调整并保存在本机浏览器配置中。颜色模块提供 16 项界面调色变量，并按主题分别保存。
 - 可创建服务器根文件系统 tar.gz 在线归档快照，写入 OpenClaw-Debugger-Private\OpenClaw-Server-Backup 并生成含 SHA-256 的清单。
 - 服务器文件写入前会将原版本以 Windows DPAPI 加密存入 OpenClaw-Debugger-Private\Rollback。
 
