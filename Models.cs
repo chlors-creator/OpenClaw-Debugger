@@ -43,6 +43,7 @@ public sealed record RemoteFileContent(
 public sealed class StickerRow : INotifyPropertyChanged
 {
     private string _tagsText = "";
+    private double _weight = 1;
 
     public string Id { get; init; } = "";
     public string ImagePath { get; init; } = "";
@@ -54,6 +55,17 @@ public sealed class StickerRow : INotifyPropertyChanged
             if (_tagsText == value) return;
             _tagsText = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TagsText)));
+        }
+    }
+
+    public double Weight
+    {
+        get => _weight;
+        set
+        {
+            if (_weight.Equals(value)) return;
+            _weight = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Weight)));
         }
     }
 

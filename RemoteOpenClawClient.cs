@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 namespace OpenClawDebugger;
 
 public sealed record RemoteStickerUploadResult(string RelativePath, long Size, string Sha256);
+public sealed record RemoteStickerRenameResult(string RelativePath, long Size, string Sha256);
 
 public sealed class RemoteOpenClawClient
 {
@@ -222,6 +223,49 @@ def upload_image():
         if os.path.exists(temporary):
             os.unlink(temporary)
     print(json.dumps({"ok": True, "relativePath": filename, "size": len(data), "sha256": sha(data)}, separators=(",", ":")))
+def rename_image():
+    old_name = P.get("oldFilename")
+    new_name = P.get("newFilename")
+    expected = P.get("expectedSha256")
+    def valid_name(name):
+        return isinstance(name, str) and bool(name) and name not in (".", "..") and len(name) <= 180 and "/" not in name and "\\" not in name and not name.endswith((".", " ")) and not any(ord(c) < 32 for c in name) and PurePosixPath(name).suffix.lower() in IMAGE_EXTS
+    if P.get("root") != "stickers" or not valid_name(old_name) or not valid_name(new_name):
+        fail("Invalid sticker filename", "bad_rename")
+    if PurePosixPath(old_name).suffix.lower() != PurePosixPath(new_name).suffix.lower():
+        fail("Changing an image extension is not supported", "bad_rename")
+    source = safe_file("stickers", old_name)
+    target = safe_file("stickers", new_name)
+    if not os.path.isfile(source) or os.path.islink(source):
+        fail("Source image does not exist", "missing")
+    if os.path.lexists(target):
+        fail("A sticker with that filename already exists", "conflict")
+    with open(source, "rb") as f:
+        source_data = f.read(MAX_IMAGE + 1)
+    if not source_data or len(source_data) > MAX_IMAGE:
+        fail("Image exceeds the 16 MiB management limit", "too_large")
+    source_hash = sha(source_data)
+    if not expected or source_hash != expected:
+        fail("Image changed since it was loaded; rescan before renaming", "conflict")
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        fail("A sticker with that filename already exists", "conflict")
+    try:
+        os.unlink(source)
+    except Exception:
+        try:
+            with open(target, "rb") as f: target_hash = sha(f.read(MAX_IMAGE + 1))
+            if target_hash == source_hash: os.unlink(target)
+        except Exception:
+            pass
+        raise
+    try:
+        dfd = os.open(ROOTS["stickers"], os.O_DIRECTORY)
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
+    except Exception:
+        pass
+    print(json.dumps({"ok": True, "relativePath": new_name, "size": len(source_data), "sha256": source_hash}, separators=(",", ":")))
 try:
     for root in ROOTS.values():
         if not os.path.isabs(root) or not os.path.isdir(root):
@@ -235,6 +279,8 @@ try:
         write_file()
     elif action == "upload":
         upload_image()
+    elif action == "rename":
+        rename_image()
     else:
         fail("不支持的操作")
 except SystemExit:
@@ -331,6 +377,24 @@ except Exception as e:
             response["relativePath"]?.GetValue<string>() ?? fileName,
             response["size"]?.GetValue<long>() ?? bytes.LongLength,
             response["sha256"]?.GetValue<string>() ?? "");
+    }
+    public async Task<RemoteStickerRenameResult> RenameStickerAsync(
+        ConnectionSettings settings, string oldFileName, string newFileName, string expectedSha256,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new JsonObject
+        {
+            ["action"] = "rename",
+            ["root"] = "stickers",
+            ["oldFilename"] = oldFileName,
+            ["newFilename"] = newFileName,
+            ["expectedSha256"] = expectedSha256
+        };
+        var response = await InvokeAsync(settings, request, cancellationToken);
+        return new RemoteStickerRenameResult(
+            response["relativePath"]?.GetValue<string>() ?? newFileName,
+            response["size"]?.GetValue<long>() ?? 0,
+            response["sha256"]?.GetValue<string>() ?? expectedSha256);
     }
     public async Task<RemoteSnapshotTransferResult> WriteServerSnapshotAsync(
         ConnectionSettings settings,

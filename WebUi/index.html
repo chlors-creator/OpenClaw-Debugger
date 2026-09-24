@@ -54,13 +54,13 @@
       </section>
 
       <section class="page" id="page-stickers">
-        <div class="section-heading"><div><div class="eyebrow">STICKER LIBRARY</div><h2>表情包与标签</h2><p>支持 GIF 原生播放；标签保存时同步更新 catalog.json 和 MANIFEST.md。</p></div><div class="button-row"><button class="button button-quiet" id="rawStickerButton" disabled>高级编辑原始文件</button><button class="button button-primary" id="saveStickerButton" disabled>保存标签</button></div></div>
+        <div class="section-heading"><div><div class="eyebrow">STICKER LIBRARY</div><h2>表情包与标签</h2><p>支持 GIF 动图和标签编辑。权重默认 1；设为 0 可停用。她会先筛出语境合适的候选，再按权重占比随机选图。</p></div><div class="button-row"><button class="button button-quiet" id="rawStickerButton" disabled>高级编辑原始文件</button><button class="button button-primary" id="saveStickerButton" disabled>保存设置</button></div></div>
         <div class="upload-dropzone disabled" id="uploadDropzone" tabindex="0" role="region" aria-label="拖放或选择本地表情包上传">
-          <input id="stickerFilesInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple hidden>
+          <input id="stickerFilesInput" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple hidden>
           <div class="upload-symbol">↑</div><div class="upload-copy"><strong>将本地表情包拖到这里</strong><small>支持 PNG、JPG、GIF、WEBP、BMP，单个文件最大 16 MB</small></div>
           <span class="upload-progress" id="uploadProgress">连接服务器后可上传</span><button class="button button-quiet" id="pickStickerButton" type="button" disabled>选择图片</button>
         </div>
-        <div class="sticker-layout"><article class="panel glass sticker-catalog"><div class="side-title"><strong>图片目录</strong><span id="stickerListCount">0</span></div><label class="search-box"><span>⌕</span><input id="stickerSearch" type="search" placeholder="筛选名称或标签"></label><div id="stickerList" class="sticker-list empty-state">连接服务器后读取表情包</div></article><article class="panel glass sticker-preview"><div class="preview-head"><div><div class="eyebrow">LIVE PREVIEW</div><h3 id="stickerTitle">选择一张贴图</h3></div><span id="stickerFormat" class="format-chip">IMAGE</span></div><div class="image-stage" id="imageStage"><div class="placeholder-art"><span>☺</span><small>图片预览</small></div><img id="stickerImage" alt="表情包预览" hidden></div><div class="preview-meta"><div><small>标签</small><p id="selectedTags">选择图片后显示标签</p></div><span id="stickerSize" class="muted small"></span></div><div class="sticker-status" id="stickerStatus">连接后读取目录和标签格式。</div></article></div>
+        <div class="sticker-layout"><article class="panel glass sticker-catalog"><div class="side-title"><strong>图片目录</strong><span id="stickerListCount">0</span></div><label class="search-box"><span>⌕</span><input id="stickerSearch" type="search" placeholder="筛选名称或标签"></label><div id="stickerList" class="sticker-list empty-state">连接服务器后读取表情包</div></article><article class="panel glass sticker-preview"><div class="preview-head"><div><div class="eyebrow">LIVE PREVIEW</div><h3 id="stickerTitle">选择一张贴图</h3></div><div class="preview-actions"><button class="button button-quiet" id="renameStickerButton" type="button" disabled>✎ 重命名</button><span id="stickerFormat" class="format-chip">IMAGE</span></div></div><div class="image-stage" id="imageStage"><div class="placeholder-art"><span>☺</span><small>图片预览</small></div><img id="stickerImage" alt="表情包预览" hidden></div><div class="preview-meta"><div><small>标签</small><p id="selectedTags">选择图片后显示标签</p></div><span id="stickerSize" class="muted small"></span></div><div class="sticker-status" id="stickerStatus">连接后读取目录和标签格式。</div></article></div>
       </section>
 
       <section class="page" id="page-themes">
@@ -84,5 +84,15 @@
   <dialog id="reviewDialog" class="modal review-modal"><form method="dialog"><div class="modal-head"><div><div class="eyebrow">CHANGE REVIEW</div><h3 id="reviewTitle">确认更改</h3></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><p class="muted">检查保存前后的内容。确认后才会写入服务器。</p><div class="diff-columns"><section><h4>保存前</h4><pre id="reviewBefore"></pre></section><section><h4>保存后</h4><pre id="reviewAfter"></pre></section></div><div class="modal-actions"><button class="button button-quiet" value="cancel">返回修改</button><button class="button button-primary" id="reviewConfirm" value="confirm">确认保存</button></div></form></dialog>
   <dialog id="rawDialog" class="modal raw-modal"><form method="dialog"><div class="modal-head"><div><div class="eyebrow">ADVANCED EDITOR</div><h3>原始标签文件</h3></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div class="raw-editors"><label>catalog.json<textarea id="rawCatalog" spellcheck="false"></textarea></label><label>MANIFEST.md<textarea id="rawManifest" spellcheck="false"></textarea></label></div><div class="modal-actions"><button class="button button-quiet" value="cancel">关闭</button><button class="button button-primary" id="rawSaveButton" value="save">校验并保存</button></div></form></dialog>
   <div id="toast" class="toast" role="status"></div>
+
+      <dialog class="modal rename-modal" id="renameDialog">
+        <form id="renameForm">
+          <div class="modal-head"><div><div class="eyebrow">RENAME STICKER</div><h3>重命名表情包</h3></div><button class="icon-button" id="renameCloseButton" type="button" aria-label="关闭">×</button></div>
+          <p class="muted">文件名会同步更新到图片目录、catalog.json 和 MANIFEST.md；扩展名保持不变。</p>
+          <label class="rename-field">新文件名<input id="renameInput" maxlength="180" autocomplete="off" spellcheck="false"></label>
+          <div class="modal-actions"><button class="button button-quiet" id="renameCancelButton" type="button">取消</button><button class="button button-primary" id="renameConfirmButton" type="submit">保存名称</button></div>
+        </form>
+      </dialog>
+
 </body>
 </html>

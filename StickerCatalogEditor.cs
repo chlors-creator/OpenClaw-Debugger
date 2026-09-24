@@ -7,23 +7,127 @@ namespace OpenClawDebugger;
 
 public sealed class ParsedStickerCatalog
 {
+    internal sealed record Binding(
+        StickerRow Row,
+        JsonObject Item,
+        string? IdProperty,
+        string? ImageProperty,
+        string? TagProperty,
+        string? WeightProperty);
+
     private readonly JsonNode _root;
-    private readonly List<(StickerRow Row, JsonObject Item, string? TagProperty)> _bindings;
+    private readonly JsonArray _entries;
+    private readonly List<Binding> _bindings;
     private readonly JsonSerializerOptions _options = new() { WriteIndented = true };
 
-    internal ParsedStickerCatalog(JsonNode root, List<(StickerRow, JsonObject, string?)> bindings)
+    internal ParsedStickerCatalog(JsonNode root, JsonArray entries, List<Binding> bindings)
     {
         _root = root;
+        _entries = entries;
         _bindings = bindings;
     }
 
     public IReadOnlyList<StickerRow> Rows => _bindings.Select(x => x.Row).ToArray();
 
+    public bool TryAddImage(string fileName, out StickerRow row, out string error)
+    {
+        row = new StickerRow();
+        error = "";
+        var template = _bindings.LastOrDefault();
+        var item = template is null ? new JsonObject() : (JsonObject)template.Item.DeepClone();
+        var idProperty = template?.IdProperty ?? (template is null ? "id" : null);
+        var imageProperty = template?.ImageProperty ?? (template is null ? "file" : null);
+        var tagProperty = template?.TagProperty ?? (template is null ? "tags" : null);
+        var weightProperty = template?.WeightProperty ?? "weight";
+
+        if (idProperty is null && imageProperty is null)
+        {
+            error = "目录条目没有可安全识别的图片路径或编号字段，无法自动登记。";
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        var id = stem;
+        var idTemplate = idProperty is null ? null : item[idProperty];
+        var numericIds = idProperty is not null && imageProperty is not null &&
+            idTemplate is JsonValue numeric && numeric.TryGetValue<long>(out _);
+        if (numericIds)
+        {
+            id = (_bindings.Select(x => long.TryParse(x.Row.Id, out var number) ? number : 0)
+                .DefaultIfEmpty(0).Max() + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        id = MakeUniqueId(id);
+        if (idProperty is not null) item[idProperty] = CreateIdNode(idTemplate, id);
+        if (imageProperty is not null) item[imageProperty] = fileName;
+        if (tagProperty is null)
+        {
+            error = "目录条目没有可识别的标签字段，无法自动登记。";
+            return false;
+        }
+        item[tagProperty] = item[tagProperty] is JsonArray ? new JsonArray() : JsonValue.Create("");
+        item[weightProperty] = JsonValue.Create(1d);
+
+        _entries.Add(item);
+        row = new StickerRow
+        {
+            Id = idProperty is null ? stem : ScalarText(item[idProperty]),
+            ImagePath = fileName,
+            TagsText = "",
+            Weight = 1
+        };
+        _bindings.Add(new Binding(row, item, idProperty, imageProperty, tagProperty, weightProperty));
+        return true;
+    }
+
+    public bool TryRenameImage(string oldPath, string newFileName, out StickerRow renamed, out string error)
+    {
+        renamed = new StickerRow();
+        error = "";
+        var index = _bindings.FindIndex(x => x.Row.ImagePath.Equals(oldPath, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+        {
+            error = "此图片没有可编辑的目录条目。";
+            return false;
+        }
+        if (_bindings.Where((binding, i) => i != index)
+            .Any(binding => binding.Row.ImagePath.Equals(newFileName, StringComparison.OrdinalIgnoreCase)))
+        {
+            error = "目录中已经有同名图片。";
+            return false;
+        }
+
+        var binding = _bindings[index];
+        if (binding.ImageProperty is null && binding.IdProperty is null)
+        {
+            error = "目录条目没有可安全更新的图片路径或编号字段。";
+            return false;
+        }
+
+        var newId = binding.ImageProperty is null
+            ? Path.GetFileNameWithoutExtension(newFileName)
+            : binding.Row.Id;
+        if (binding.ImageProperty is not null) binding.Item[binding.ImageProperty] = newFileName;
+        if (binding.ImageProperty is null && binding.IdProperty is not null)
+            binding.Item[binding.IdProperty] = CreateIdNode(binding.Item[binding.IdProperty], newId);
+
+        renamed = new StickerRow { Id = newId, ImagePath = newFileName, TagsText = binding.Row.TagsText, Weight = binding.Row.Weight };
+        _bindings[index] = binding with { Row = renamed };
+        return true;
+    }
+
     public string SerializeWithEdits()
     {
-        foreach (var (row, item, existingProperty) in _bindings)
+        foreach (var binding in _bindings)
         {
-            var key = existingProperty ?? "tags";
+            var row = binding.Row;
+            var item = binding.Item;
+            if (binding.IdProperty is not null)
+                item[binding.IdProperty] = CreateIdNode(item[binding.IdProperty], row.Id);
+            if (binding.ImageProperty is not null) item[binding.ImageProperty] = row.ImagePath;
+            item[binding.WeightProperty ?? "weight"] = JsonValue.Create(row.Weight);
+
+            var key = binding.TagProperty ?? "tags";
             var tags = row.TagsText.Split([',', '，', ';', '；', '\n', '\r'],
                 StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -37,6 +141,34 @@ public sealed class ParsedStickerCatalog
 
         return _root.ToJsonString(_options) + Environment.NewLine;
     }
+
+    private string MakeUniqueId(string preferred)
+    {
+        var existing = new HashSet<string>(_bindings.Select(x => x.Row.Id), StringComparer.OrdinalIgnoreCase);
+        if (!existing.Contains(preferred)) return preferred;
+        var suffix = 2;
+        while (existing.Contains(preferred + "-" + suffix)) suffix++;
+        return preferred + "-" + suffix;
+    }
+
+    private static JsonNode? CreateIdNode(JsonNode? template, string id)
+    {
+        if (template is JsonValue value && value.TryGetValue<long>(out _) &&
+            long.TryParse(id, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var number))
+            return JsonValue.Create(number);
+        return JsonValue.Create(id);
+    }
+
+    private static string ScalarText(JsonNode? node)
+    {
+        if (node is null) return "";
+        if (node is JsonValue value)
+        {
+            try { return value.GetValue<string>(); } catch { }
+            return value.ToJsonString();
+        }
+        return "";
+    }
 }
 
 public static class StickerCatalogEditor
@@ -45,6 +177,7 @@ public static class StickerCatalogEditor
     private static readonly string[] IdNames = ["id", "number", "index", "no", "编号"];
     private static readonly string[] ImageNames = ["file", "filename", "image", "path", "src", "asset", "name"];
     private static readonly string[] TagNames = ["tags", "labels", "keywords", "标签"];
+    private static readonly string[] WeightNames = ["weight", "selectionWeight", "selection_weight", "权重"];
 
     public static bool TryParse(string json, IReadOnlyList<RemoteFile> images,
         out ParsedStickerCatalog? catalog, out string error)
@@ -71,7 +204,13 @@ public static class StickerCatalogEditor
             return false;
         }
 
-        var bindings = new List<(StickerRow, JsonObject, string?)>();
+        var bindings = new List<ParsedStickerCatalog.Binding>();
+        if (array.Count == 0)
+        {
+            catalog = new ParsedStickerCatalog(root, array, bindings);
+            return true;
+        }
+
         var imageNames = images.Where(x => x.IsImage).Select(x => x.RelativePath).ToArray();
         foreach (var node in array)
         {
@@ -79,6 +218,7 @@ public static class StickerCatalogEditor
             var idProp = FindProperty(item, IdNames);
             var imageProp = FindProperty(item, ImageNames);
             var tagProp = FindProperty(item, TagNames);
+            var weightProp = FindProperty(item, WeightNames);
             if (tagProp is null || (item[tagProp] is not JsonArray && item[tagProp] is not JsonValue))
             {
                 error = "目录条目没有可安全识别的字符串标签字段。请使用高级原始文件编辑，结构化标签编辑保持关闭。";
@@ -90,6 +230,16 @@ public static class StickerCatalogEditor
                 return false;
             }
             var id = idProp is null ? "" : ScalarText(item[idProp]);
+            var weight = 1d;
+            if (weightProp is not null && item[weightProp] is not null)
+            {
+                if (item[weightProp] is not JsonValue weightValue || !weightValue.TryGetValue<double>(out weight) ||
+                    !double.IsFinite(weight) || weight < 0 || weight > 1_000_000)
+                {
+                    error = "表情包权重必须是 0 到 1,000,000 之间的有限数字。";
+                    return false;
+                }
+            }
             var imagePath = imageProp is null ? "" : ScalarText(item[imageProp]);
             if (string.IsNullOrWhiteSpace(imagePath))
                 imagePath = FindImageById(imageNames, id);
@@ -98,14 +248,15 @@ public static class StickerCatalogEditor
             if (string.IsNullOrWhiteSpace(id) && string.IsNullOrWhiteSpace(imagePath))
                 continue;
 
-            var tags = tagProp is null ? [] : ParseTags(item[tagProp]);
+            var tags = ParseTags(item[tagProp]);
             var row = new StickerRow
             {
                 Id = id,
                 ImagePath = imagePath,
-                TagsText = string.Join(", ", tags)
+                TagsText = string.Join(", ", tags),
+                Weight = weight
             };
-            bindings.Add((row, item, tagProp));
+            bindings.Add(new ParsedStickerCatalog.Binding(row, item, idProp, imageProp, tagProp, weightProp));
         }
 
         if (bindings.Count == 0)
@@ -114,7 +265,7 @@ public static class StickerCatalogEditor
             return false;
         }
 
-        catalog = new ParsedStickerCatalog(root, bindings);
+        catalog = new ParsedStickerCatalog(root, array, bindings);
         return true;
     }
 
@@ -197,18 +348,31 @@ public static class StickerManifestSynchronizer
             if (!lines[headerIndex].Contains('|', StringComparison.Ordinal)) continue;
             var headers = SplitCells(lines[headerIndex]);
             var tagIndex = FindColumn(headers, ["tag", "tags", "label", "labels", "标签"]);
+            var weightIndex = FindColumn(headers, ["weight", "selectionweight", "selection_weight", "权重"]);
             var idIndex = FindColumn(headers, ["id", "number", "no", "编号", "序号"]);
             var fileIndex = FindColumn(headers, ["file", "filename", "image", "path", "文件", "图片"]);
             if (tagIndex < 0 || (idIndex < 0 && fileIndex < 0) || headerIndex + 1 >= lines.Count) continue;
             if (!IsSeparator(lines[headerIndex + 1])) continue;
+
+            if (weightIndex < 0)
+            {
+                headers.Add("权重");
+                lines[headerIndex] = JoinCells(headers, lines[headerIndex].StartsWith('|'));
+                var separator = SplitCells(lines[headerIndex + 1]);
+                separator.Add("---");
+                lines[headerIndex + 1] = JoinCells(separator, lines[headerIndex + 1].StartsWith('|'));
+                weightIndex = headers.Count - 1;
+            }
 
             var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (var i = headerIndex + 2; i < lines.Count && lines[i].Contains('|', StringComparison.Ordinal); i++)
             {
                 var cells = SplitCells(lines[i]);
                 var row = MatchRow(rows, cells, idIndex, fileIndex);
-                if (row is null || tagIndex >= cells.Count) continue;
+                if (row is null) continue;
+                while (cells.Count < headers.Count) cells.Add("");
                 cells[tagIndex] = string.Join(", ", NormalizeTags(row.TagsText)).Replace("|", "\\|", StringComparison.Ordinal);
+                cells[weightIndex] = FormatWeight(row.Weight);
                 lines[i] = JoinCells(cells, lines[i].StartsWith('|'));
                 matched.Add(row.Id + "\0" + row.ImagePath);
             }
@@ -251,6 +415,111 @@ public static class StickerManifestSynchronizer
         return true;
     }
 
+    public static bool TryAppendRow(string original, IReadOnlyList<StickerRow> existingRows,
+        StickerRow newRow, out string updated, out string error)
+    {
+        updated = original;
+        error = "";
+        var lines = original.Replace("\r\n", "\n").Split('\n').ToList();
+
+        for (var headerIndex = 0; headerIndex < lines.Count; headerIndex++)
+        {
+            if (!lines[headerIndex].Contains('|', StringComparison.Ordinal)) continue;
+            var headers = SplitCells(lines[headerIndex]);
+            var tagIndex = FindColumn(headers, ["tag", "tags", "label", "labels", "标签"]);
+            var idIndex = FindColumn(headers, ["id", "number", "no", "编号", "序号"]);
+            var fileIndex = FindColumn(headers, ["file", "filename", "image", "path", "文件", "图片"]);
+            if (tagIndex < 0 || (idIndex < 0 && fileIndex < 0) ||
+                headerIndex + 1 >= lines.Count || !IsSeparator(lines[headerIndex + 1])) continue;
+
+            var endIndex = headerIndex + 2;
+            var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (endIndex < lines.Count && lines[endIndex].Contains('|', StringComparison.Ordinal))
+            {
+                var cells = SplitCells(lines[endIndex]);
+                var match = MatchRow(existingRows, cells, idIndex, fileIndex);
+                if (match is not null) matched.Add(match.Id + "\0" + match.ImagePath);
+                endIndex++;
+            }
+            if (matched.Count != existingRows.Count) continue;
+
+            var newCells = Enumerable.Repeat("", headers.Count).ToList();
+            if (idIndex >= 0 && idIndex < newCells.Count) newCells[idIndex] = newRow.Id;
+            if (fileIndex >= 0 && fileIndex < newCells.Count) newCells[fileIndex] = Path.GetFileName(newRow.ImagePath);
+            if (tagIndex >= 0 && tagIndex < newCells.Count) newCells[tagIndex] = "";
+            lines.Insert(endIndex, JoinCells(newCells, lines[headerIndex].TrimStart().StartsWith('|')));
+            var candidate = string.Join("\n", lines).Replace("\n", Environment.NewLine);
+            return TryUpdate(candidate, existingRows.Append(newRow).ToArray(), out updated, out error);
+        }
+
+        var trimmed = original.TrimEnd('\r', '\n');
+        var newLine = newRow.Id + " " + Path.GetFileName(newRow.ImagePath) + " 标签：";
+        var candidateText = string.IsNullOrEmpty(trimmed)
+            ? newLine
+            : trimmed + Environment.NewLine + newLine;
+        return TryUpdate(candidateText, existingRows.Append(newRow).ToArray(), out updated, out error);
+    }
+
+    public static bool TryRenameReferences(string original, StickerRow oldRow, StickerRow newRow,
+        IReadOnlyList<StickerRow> rows, out string updated, out string error)
+    {
+        updated = original;
+        error = "";
+        var lines = original.Replace("\r\n", "\n").Split('\n').ToList();
+
+        for (var headerIndex = 0; headerIndex < lines.Count; headerIndex++)
+        {
+            if (!lines[headerIndex].Contains('|', StringComparison.Ordinal)) continue;
+            var headers = SplitCells(lines[headerIndex]);
+            var tagIndex = FindColumn(headers, ["tag", "tags", "label", "labels", "标签"]);
+            var idIndex = FindColumn(headers, ["id", "number", "no", "编号", "序号"]);
+            var fileIndex = FindColumn(headers, ["file", "filename", "image", "path", "文件", "图片"]);
+            if (tagIndex < 0 || (idIndex < 0 && fileIndex < 0) ||
+                headerIndex + 1 >= lines.Count || !IsSeparator(lines[headerIndex + 1])) continue;
+
+            var found = 0;
+            for (var i = headerIndex + 2; i < lines.Count && lines[i].Contains('|', StringComparison.Ordinal); i++)
+            {
+                var cells = SplitCells(lines[i]);
+                if (MatchRow([oldRow], cells, idIndex, fileIndex) is null) continue;
+                found++;
+                if (idIndex >= 0 && idIndex < cells.Count) cells[idIndex] = newRow.Id;
+                if (fileIndex >= 0 && fileIndex < cells.Count) cells[fileIndex] = Path.GetFileName(newRow.ImagePath);
+                lines[i] = JoinCells(cells, lines[i].StartsWith('|'));
+            }
+            if (found != 1)
+            {
+                error = "MANIFEST.md 中没有唯一匹配的图片记录，不能安全重命名。";
+                return false;
+            }
+
+            var candidate = string.Join("\n", lines).Replace("\n", Environment.NewLine);
+            return TryUpdate(candidate, rows, out updated, out error);
+        }
+
+        var oldFile = Path.GetFileName(oldRow.ImagePath);
+        var newFile = Path.GetFileName(newRow.ImagePath);
+        var matchedLines = new List<int>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var fileMatch = lines[i].Contains(oldFile, StringComparison.OrdinalIgnoreCase);
+            var idMatch = !string.IsNullOrWhiteSpace(oldRow.Id) &&
+                Regex.IsMatch(lines[i], $@"(?<!\d){Regex.Escape(oldRow.Id)}(?!\d)");
+            if (fileMatch || idMatch) matchedLines.Add(i);
+        }
+        if (matchedLines.Count != 1)
+        {
+            error = "MANIFEST.md 中没有唯一匹配的图片记录，不能安全重命名。";
+            return false;
+        }
+        var line = lines[matchedLines[0]].Replace(oldFile, newFile, StringComparison.OrdinalIgnoreCase);
+        if (!oldRow.Id.Equals(newRow.Id, StringComparison.Ordinal))
+            line = Regex.Replace(line, $@"(?<!\d){Regex.Escape(oldRow.Id)}(?!\d)", newRow.Id);
+        lines[matchedLines[0]] = line;
+        var fallback = string.Join("\n", lines).Replace("\n", Environment.NewLine);
+        return TryUpdate(fallback, rows, out updated, out error);
+    }
+
     private static StickerRow? MatchRow(IReadOnlyList<StickerRow> rows,
         IReadOnlyList<string> cells, int idIndex, int fileIndex)
     {
@@ -285,6 +554,9 @@ public static class StickerManifestSynchronizer
 
     private static string CleanCell(string value) =>
         Regex.Replace(value.Trim(), @"[\u0060*_]", "");
+
+    private static string FormatWeight(double value) =>
+        value.ToString("0.################", System.Globalization.CultureInfo.InvariantCulture);
 
     private static IEnumerable<string> NormalizeTags(string value) =>
         value.Split([',', '，', ';', '；', '\n', '\r'],

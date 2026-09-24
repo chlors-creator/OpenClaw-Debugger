@@ -7,6 +7,13 @@
   let toastTimer = 0;
   let dirtySyncTimer = 0;
   let uploadInProgress = false;
+  let renameInProgress = false;
+  let stickerPreviewLoading = false;
+  const stickerImageCache = new Map();
+  const stickerImageReads = new Map();
+  const stickerCacheLimit = 96 * 1024 * 1024;
+  let stickerCacheBytes = 0;
+  let stickerThumbnailObserver = null;
   let currentTab = 'overview';
   let settings = { host: '106.14.173.90', username: 'admin', port: 22, workspacePath: '/home/admin/.openclaw/workspace', stickersPath: '/home/admin/.openclaw/workspace/stickers' };
   let memoryFiles = [];
@@ -73,8 +80,15 @@
     else operation.reject(new Error(message.error || '操作失败。'));
   }
 
+  function syncRenameButton() {
+    const connected = $('.connection-chip').classList.contains('connected');
+    const row = stickerRows.find(item => item.imagePath === currentSticker);
+    $('#renameStickerButton').disabled = !connected || !row || !stickerEditingEnabled ||
+      stickerPreviewLoading || uploadInProgress || renameInProgress || dirtyMemory || dirtyStickers || dirtyRaw;
+  }
+
   function setBusy(busy) {
-    const busyNow = Boolean(busy || uploadInProgress);
+    const busyNow = Boolean(busy || uploadInProgress || renameInProgress);
     const connected = $('.connection-chip').classList.contains('connected');
     document.body.classList.toggle('busy', busyNow);
     $('#connectButton').disabled = busyNow;
@@ -87,6 +101,7 @@
     const uploadReady = !busyNow && connected;
     $('#pickStickerButton').disabled = !uploadReady;
     $('#uploadDropzone').classList.toggle('disabled', !uploadReady);
+    syncRenameButton();
   }
 
   function setStatus(text, isError) {
@@ -132,6 +147,7 @@
     $('#saveMemoryButton').disabled = !memoryEditing || !dirtyMemory;
     $('#saveStickerButton').disabled = !stickerEditingEnabled || !dirtyStickers;
     $('#memoryEditorState').textContent = dirtyMemory ? '有未保存修改' : (memoryEditing ? '编辑模式' : '只读预览');
+    syncRenameButton();
   }
 
   function getConnectionSettings() {
@@ -234,6 +250,7 @@
     const query = $('#memorySearch').value.trim().toLowerCase();
     const filtered = memoryFiles.filter(file => file.relativePath.toLowerCase().includes(query));
     $('#memoryListCount').textContent = filtered.length;
+    if (stickerThumbnailObserver) stickerThumbnailObserver.disconnect();
     list.replaceChildren();
     if (!filtered.length) {
       list.classList.add('empty-state');
@@ -295,28 +312,105 @@
     filtered.forEach(row => {
       const card = document.createElement('div');
       card.className = 'sticker-row' + (currentSticker === row.imagePath ? ' selected' : '');
-      const thumb = document.createElement('div'); thumb.className = 'sticker-thumb'; thumb.textContent = fileIsGif(row.imagePath) ? 'GIF' : '☺';
+      const thumb = document.createElement('div'); thumb.className = 'sticker-thumb';
+      const fallback = document.createElement('span'); fallback.className = 'sticker-thumb-fallback'; fallback.textContent = fileIsGif(row.imagePath) ? 'GIF' : '☺';
+      const thumbnail = document.createElement('img'); thumbnail.className = 'sticker-thumb-image'; thumbnail.alt = ''; thumbnail.decoding = 'async'; thumbnail._stickerRow = row;
+      thumb.append(fallback, thumbnail);
       const main = document.createElement('div'); main.className = 'sticker-row-main';
       const title = document.createElement('div'); title.className = 'sticker-row-title'; title.textContent = row.imagePath;
       const meta = document.createElement('div'); meta.className = 'sticker-row-meta'; meta.textContent = row.id + (row.tagsText ? ' · ' + row.tagsText : ' · 无标签');
       const tags = document.createElement('input'); tags.className = 'sticker-tags-input'; tags.type = 'text'; tags.value = row.tagsText || ''; tags.placeholder = row.catalogued && stickerEditingEnabled ? '输入标签…' : '尚未登记目录'; tags.disabled = !stickerEditingEnabled || row.catalogued === false; tags.setAttribute('aria-label', '标签 ' + row.imagePath);
+      const controls = document.createElement('div'); controls.className = 'sticker-row-controls'; controls.append(tags);
+      const weightLabel = document.createElement('label'); weightLabel.className = 'sticker-weight-control';
+      const weightCaption = document.createElement('span'); weightCaption.textContent = '权重';
+      const weightInput = document.createElement('input'); weightInput.className = 'sticker-weight-input'; weightInput.type = 'number'; weightInput.min = '0'; weightInput.max = '1000000'; weightInput.step = 'any'; weightInput.required = true; weightInput.value = String(Number.isFinite(Number(row.weight)) ? Number(row.weight) : 1); weightInput.disabled = !stickerEditingEnabled || row.catalogued === false; weightInput.setAttribute('aria-label', '表情包选择权重 ' + row.imagePath); weightInput.title = '0 表示不参与抽取；权重越大，在语境合适的候选中被抽中的概率越高。';
+      weightLabel.append(weightCaption, weightInput); controls.append(weightLabel);
       tags.addEventListener('input', () => {
         row.tagsText = tags.value;
         meta.textContent = row.id + (tags.value ? ' · ' + tags.value : ' · 无标签');
-        dirtyStickers = stickerRows.some((item, index) => (item.tagsText || '') !== (originalStickerRows[index] && originalStickerRows[index].tagsText || ''));
-        setDirtyState();
+        updateStickerDirty();
       });
-      card.addEventListener('click', event => { if (event.target !== tags) selectSticker(row); });
-      main.append(title, meta, tags); card.append(thumb, main); list.append(card);
+      weightInput.addEventListener('input', () => {
+        const weight = weightInput.valueAsNumber;
+        row.weightInvalid = !weightInput.value || !weightInput.validity.valid || !Number.isFinite(weight) || weight < 0 || weight > 1000000;
+        if (!row.weightInvalid) row.weight = weight;
+        updateStickerDirty();
+      });
+      card.addEventListener('click', event => { if (!controls.contains(event.target)) selectSticker(row); });
+      main.append(title, meta, controls); card.append(thumb, main); list.append(card);
+      if (stickerThumbnailObserver) stickerThumbnailObserver.observe(thumbnail); else loadStickerThumbnail(row, thumbnail);
     });
   }
 
   let originalStickerRows = [];
+  function snapshotStickerRows() {
+    return stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '', weight: Number(row.weight ?? 1) }));
+  }
+  function updateStickerDirty() {
+    dirtyStickers = stickerRows.some((row, index) => row.weightInvalid ||
+      (row.tagsText || '') !== (originalStickerRows[index] && originalStickerRows[index].tagsText || '') ||
+      Number(row.weight ?? 1) !== Number((originalStickerRows[index] && originalStickerRows[index].weight) ?? 1));
+    setDirtyState();
+  }
   function fileIsGif(path) { return path.toLowerCase().endsWith('.gif'); }
+
+  function rememberStickerImage(path, preview) {
+    const size = Number(preview.size) || Math.ceil((preview.dataUrl || '').length * 0.75);
+    const previous = stickerImageCache.get(path);
+    if (previous) stickerCacheBytes -= previous.size;
+    if (size > stickerCacheLimit) { stickerImageCache.delete(path); return preview; }
+    stickerImageCache.delete(path);
+    stickerImageCache.set(path, { dataUrl: preview.dataUrl, size: size });
+    stickerCacheBytes += size;
+    while (stickerCacheBytes > stickerCacheLimit && stickerImageCache.size) {
+      const oldestKey = stickerImageCache.keys().next().value;
+      const oldest = stickerImageCache.get(oldestKey);
+      stickerCacheBytes -= oldest.size;
+      stickerImageCache.delete(oldestKey);
+    }
+    return preview;
+  }
+
+  function clearStickerImageCache() {
+    stickerImageCache.clear(); stickerImageReads.clear(); stickerCacheBytes = 0;
+  }
+
+  function moveStickerImageCache(oldPath, newPath) {
+    const cached = stickerImageCache.get(oldPath);
+    if (!cached) return;
+    stickerImageCache.delete(oldPath);
+    stickerImageCache.set(newPath, cached);
+  }
+
+  function loadStickerImage(path) {
+    const cached = stickerImageCache.get(path);
+    if (cached) {
+      stickerImageCache.delete(path); stickerImageCache.set(path, cached);
+      return Promise.resolve(cached);
+    }
+    if (stickerImageReads.has(path)) return stickerImageReads.get(path);
+    const read = bridgeCall('readSticker', { path: path }).then(preview => rememberStickerImage(path, preview))
+      .finally(() => stickerImageReads.delete(path));
+    stickerImageReads.set(path, read);
+    return read;
+  }
+
+  async function loadStickerThumbnail(row, image) {
+    try {
+      const preview = await loadStickerImage(row.imagePath);
+      if (!image.isConnected) return;
+      image.src = preview.dataUrl;
+      image.parentElement.classList.add('has-image');
+    } catch (_) {
+      if (image.isConnected) image.parentElement.classList.add('thumbnail-unavailable');
+    }
+  }
 
   async function selectSticker(row) {
     currentSticker = row.imagePath;
+    stickerPreviewLoading = true;
     renderStickerList();
+    syncRenameButton();
     $('#stickerTitle').textContent = row.imagePath;
     $('#selectedTags').textContent = row.tagsText ? row.tagsText : '当前没有标签';
     $('#stickerFormat').textContent = fileIsGif(row.imagePath) ? 'ANIMATED GIF' : row.imagePath.split('.').pop().toUpperCase();
@@ -325,17 +419,59 @@
     $('.placeholder-art').hidden = false;
     $('#stickerStatus').textContent = fileIsGif(row.imagePath) ? '正在读取 GIF 动图…' : '正在读取图片…';
     try {
-      const preview = await bridgeCall('readSticker', { path: row.imagePath });
+      const preview = await loadStickerImage(row.imagePath);
       if (currentSticker !== row.imagePath) return;
       $('#stickerImage').src = preview.dataUrl;
       $('#stickerImage').hidden = false;
       $('.placeholder-art').hidden = true;
       $('#stickerSize').textContent = sizeLabel(preview.size);
       $('#stickerStatus').textContent = fileIsGif(row.imagePath) ? 'GIF 已加载并由内嵌浏览器原生播放。' : '图片预览已加载。';
-    } catch (error) { $('#stickerStatus').textContent = '图片读取失败：' + error.message; }
+    } catch (error) {
+      if (currentSticker === row.imagePath) $('#stickerStatus').textContent = '图片读取失败：' + error.message;
+    } finally {
+      if (currentSticker === row.imagePath) { stickerPreviewLoading = false; syncRenameButton(); }
+    }
   }
 
-  function rowsPayload() { return stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '' })); }
+  function openRenameDialog() {
+    const row = stickerRows.find(item => item.imagePath === currentSticker);
+    if (!row || !stickerEditingEnabled) return;
+    $('#renameInput').value = row.imagePath;
+    $('#renameDialog').showModal();
+    $('#renameInput').focus();
+    const dot = row.imagePath.lastIndexOf('.');
+    $('#renameInput').setSelectionRange(0, dot > 0 ? dot : row.imagePath.length);
+  }
+
+  async function submitStickerRename() {
+    const oldName = currentSticker;
+    const newName = $('#renameInput').value.trim();
+    if (!oldName || !newName) { showToast('请输入新的图片文件名。', true); return; }
+    if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(newName)) { showToast('请保留原图片扩展名。', true); return; }
+    renameInProgress = true; setBusy(true);
+    $('#renameConfirmButton').disabled = true;
+    try {
+      const result = await bridgeCall('renameSticker', { oldFileName: oldName, newFileName: newName });
+      moveStickerImageCache(oldName, result.fileName);
+      stickerRows = result.stickerFiles || stickerRows;
+      originalStickerRows = snapshotStickerRows();
+      if (typeof result.catalogText === 'string') originalCatalog = result.catalogText;
+      if (typeof result.manifestText === 'string') originalManifest = result.manifestText;
+      currentSticker = result.fileName;
+      $('#stickerCount').textContent = result.stickerCount;
+      $('#stickerListCount').textContent = stickerRows.length;
+      dirtyStickers = false;
+      $('#renameDialog').close();
+      renderStickerList(); setDirtyState();
+      const renamed = stickerRows.find(row => row.imagePath === result.fileName);
+      if (renamed) await selectSticker(renamed);
+      setStatus('已重命名，并同步更新 catalog.json 与 MANIFEST.md。');
+      showToast('表情包重命名完成。');
+    } catch (error) { reportError(error); }
+    finally { renameInProgress = false; $('#renameConfirmButton').disabled = false; setBusy(false); }
+  }
+
+  function rowsPayload() { return stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '', weight: Number(row.weight ?? 1) })); }
 
   function review(title, before, after) {
     $('#reviewTitle').textContent = title;
@@ -369,9 +505,10 @@
 
   async function saveStickerRows() {
     if (!dirtyStickers) return;
+    if (stickerRows.some(row => row.weightInvalid)) { showToast('权重必须是 0 到 1,000,000 之间的数字。', true); return; }
     try {
       const preview = await bridgeCall('previewStickerRows', { rows: rowsPayload() });
-      const okay = await review('保存表情包标签（两份文件）', preview.before, preview.after);
+      const okay = await review('保存表情包标签与权重（两份文件）', preview.before, preview.after);
       if (!okay) return;
       $('#saveStickerButton').disabled = true;
       const result = await bridgeCall('saveStickerRows', { rows: rowsPayload() });
@@ -379,9 +516,9 @@
       originalManifest = result.manifestText || originalManifest;
       if (result.stickerFiles) stickerRows = result.stickerFiles;
       stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
-      originalStickerRows = stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '' }));
+      originalStickerRows = snapshotStickerRows();
       dirtyStickers = false; setDirtyState(); renderStickerList();
-      setStatus(result.changed ? '表情包标签已同步保存；生成 ' + result.snapshotCount + ' 份加密快照。' : '标签没有变化。');
+      setStatus(result.changed ? '表情包标签与权重已同步保存；生成 ' + result.snapshotCount + ' 份加密快照。' : '表情包设置没有变化。');
       showToast('表情包标签已保存。');
     } catch (error) { reportError(error); $('#saveStickerButton').disabled = false; }
   }
@@ -409,9 +546,10 @@
     try {
       await bridgeCall('saveSettings', getConnectionSettings());
       const result = await bridgeCall('connect', {});
+      clearStickerImageCache();
       memoryFiles = result.memoryFiles || [];
       stickerRows = result.stickerFiles || [];
-      originalStickerRows = stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '' }));
+      originalStickerRows = snapshotStickerRows();
       stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
       originalCatalog = result.catalogText || '';
       originalManifest = result.manifestText || '';
@@ -447,6 +585,23 @@
     return btoa(binary);
   }
 
+  function hasDraggedFiles(dataTransfer) {
+    if (!dataTransfer) return false;
+    if (dataTransfer.files && dataTransfer.files.length) return true;
+    if (dataTransfer.items && Array.from(dataTransfer.items).some(item => item.kind === 'file')) return true;
+    return Array.from(dataTransfer.types || []).some(type => String(type).toLowerCase() === 'files' || String(type).toLowerCase().startsWith('image/'));
+  }
+
+  function getDroppedFiles(dataTransfer) {
+    if (!dataTransfer) return [];
+    const direct = Array.from(dataTransfer.files || []);
+    if (direct.length) return direct;
+    return Array.from(dataTransfer.items || [])
+      .filter(item => item.kind === 'file')
+      .map(item => { try { return item.getAsFile(); } catch (_) { return null; } })
+      .filter(Boolean);
+  }
+
   async function uploadFiles(fileList) {
     if (!$('.connection-chip').classList.contains('connected')) { showToast('请先连接服务器再上传。', true); return; }
     if (dirtyMemory || dirtyStickers || dirtyRaw) { showToast('请先保存或放弃当前修改，再上传表情包。', true); return; }
@@ -461,6 +616,7 @@
     uploadInProgress = true;
     setBusy(true);
     const progress = $('#uploadProgress');
+    const registrationFailures = [];
     try {
       for (const file of files) {
         progress.textContent = '准备上传 ' + file.name;
@@ -476,14 +632,17 @@
           }
           const result = await bridgeCall('commitStickerUpload', { uploadId: started.uploadId });
           stickerRows = result.stickerFiles || stickerRows;
-          originalStickerRows = stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '' }));
+          if (typeof result.catalogText === 'string') originalCatalog = result.catalogText;
+          if (typeof result.manifestText === 'string') originalManifest = result.manifestText;
+          originalStickerRows = snapshotStickerRows();
           stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
           dirtyStickers = false;
           $('#stickerCount').textContent = result.stickerCount;
           $('#stickerListCount').textContent = stickerRows.length;
           $('#saveStickerButton').disabled = !stickerEditingEnabled;
           renderStickerList(); setDirtyState();
-          $('#stickerStatus').textContent = '图片已上传到服务器。新图片尚未登记标签条目；如需编辑其标签，请在“高级编辑原始文件”中将它加入 catalog.json 与 MANIFEST.md。';
+          $('#stickerStatus').textContent = result.registered === false ? '图片已上传，但自动登记失败：' + (result.registrationError || '请检查目录文件。') : '图片已上传并自动登记为无标签条目，可直接在目录中添加标签。';
+          if (result.registered === false) registrationFailures.push(file.name);
           setStatus('上传完成：' + result.fileName + ' · ' + sizeLabel(result.size));
           progress.textContent = '已上传 ' + file.name;
           const added = stickerRows.find(row => row.imagePath === result.fileName);
@@ -493,7 +652,8 @@
           throw error;
         }
       }
-      showToast(files.length === 1 ? '表情包上传完成。' : '已上传 ' + files.length + ' 张表情包。');
+      if (registrationFailures.length) showToast('图片已上传，但有目录登记失败；请查看表情包状态。', true);
+      else showToast(files.length === 1 ? '表情包上传并登记完成。' : '已上传并登记 ' + files.length + ' 张表情包。');
     } catch (error) { reportError(error); progress.textContent = '上传失败'; }
     finally { uploadInProgress = false; setBusy(false); }
   }
@@ -533,7 +693,7 @@
       originalCatalog = result.catalogText || catalog; originalManifest = result.manifestText || manifest;
       if (result.stickerFiles) stickerRows = result.stickerFiles;
       stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
-      originalStickerRows = stickerRows.map(row => ({ id: row.id, imagePath: row.imagePath, tagsText: row.tagsText || '' }));
+      originalStickerRows = snapshotStickerRows();
       dirtyRaw = false; dirtyStickers = false;
       const raw = $('#rawDialog'); raw.close('saved');
       renderStickerList();
@@ -595,15 +755,31 @@
     uploadZone.addEventListener('click', event => { if (!event.target.closest('button') && !event.target.closest('input') && !uploadZone.classList.contains('disabled')) uploadInput.click(); });
     uploadZone.addEventListener('keydown', event => { if ((event.key === 'Enter' || event.key === ' ') && !uploadZone.classList.contains('disabled')) { event.preventDefault(); uploadInput.click(); } });
     uploadInput.addEventListener('change', () => { uploadFiles(uploadInput.files).finally(() => { uploadInput.value = ''; }); });
-    uploadZone.addEventListener('dragenter', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); uploadZone.classList.add('drop-active'); } });
-    uploadZone.addEventListener('dragover', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; uploadZone.classList.add('drop-active'); } });
+    $('#renameStickerButton').addEventListener('click', openRenameDialog);
+    $('#renameCancelButton').addEventListener('click', () => $('#renameDialog').close());
+    $('#renameCloseButton').addEventListener('click', () => $('#renameDialog').close());
+    $('#renameForm').addEventListener('submit', event => { event.preventDefault(); submitStickerRename(); });
+    stickerThumbnailObserver = 'IntersectionObserver' in window
+      ? new IntersectionObserver(entries => entries.forEach(entry => {
+          if (!entry.isIntersecting) return;
+          stickerThumbnailObserver.unobserve(entry.target);
+          loadStickerThumbnail(entry.target._stickerRow, entry.target);
+        }), { root: $('#stickerList'), rootMargin: '100px' })
+      : null;
+    uploadZone.addEventListener('dragenter', event => { event.preventDefault(); if (hasDraggedFiles(event.dataTransfer)) uploadZone.classList.add('drop-active'); });
+    uploadZone.addEventListener('dragover', event => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'; uploadZone.classList.add('drop-active'); });
     uploadZone.addEventListener('dragleave', event => { if (!uploadZone.contains(event.relatedTarget)) uploadZone.classList.remove('drop-active'); });
-    uploadZone.addEventListener('drop', event => { if (event.dataTransfer && event.dataTransfer.files.length) { event.preventDefault(); event.stopPropagation(); uploadZone.classList.remove('drop-active'); uploadFiles(event.dataTransfer.files); } });
-    document.addEventListener('dragover', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault(); });
+    uploadZone.addEventListener('drop', event => {
+      event.preventDefault(); event.stopPropagation(); uploadZone.classList.remove('drop-active');
+      const files = getDroppedFiles(event.dataTransfer);
+      if (files.length) uploadFiles(files); else showToast('没有读取到拖入的本地文件，请再试一次。', true);
+    });
+    document.addEventListener('dragover', event => { if (hasDraggedFiles(event.dataTransfer)) event.preventDefault(); });
     document.addEventListener('drop', event => {
-      if (!event.dataTransfer || !event.dataTransfer.files.length) return;
+      const files = getDroppedFiles(event.dataTransfer);
+      if (!files.length) return;
       event.preventDefault();
-      if (currentTab === 'stickers' && !uploadZone.contains(event.target)) uploadFiles(event.dataTransfer.files);
+      if (currentTab === 'stickers' && !uploadZone.contains(event.target)) uploadFiles(files);
       else if (currentTab !== 'stickers') showToast('请先打开表情包页面再拖入图片。', true);
     });
     $('#rawCatalog').addEventListener('input', () => { dirtyRaw = $('#rawCatalog').value !== originalCatalog || $('#rawManifest').value !== originalManifest; setDirtyState(); });

@@ -7,7 +7,7 @@ Windows 本地桌面管理工具。界面使用 HTML/CSS/JavaScript 构建，由
 - 通过本机 Windows OpenSSH 连接服务器，复用当前 Windows 用户的 SSH 配置、known_hosts 和登录身份。
 - 只读扫描 OpenClaw 工作区 Markdown、表情包目录及图片。
 - 浏览并编辑工作区记忆 Markdown 文件。保存前显示完整内容差异、重新读取远端并校验 SHA-256。
-- 预览贴图与原生 GIF 动图；标签编辑支持先预览 catalog.json 和 MANIFEST.md 的差异，再同步写入两份文件。支持拖放或选择 PNG、JPG、GIF、WEBP、BMP 图片上传到表情包目录；同名文件拒绝覆盖，单张最大 16 MiB。上传后若需编辑新图标签，可在高级编辑器中登记目录条目。
+- 预览贴图与原生 GIF 动图；图片目录按需显示缩略图，并缓存最近查看的图片，切换回来时不重复读取服务器。标签编辑支持先预览 catalog.json 和 MANIFEST.md 的差异，再同步写入两份文件。 每张表情包还可设置 0–1,000,000 的选择权重（默认 1，设为 0 即停用）；服务器在模型圈定的语境合适候选中按“单张权重 ÷ 候选总权重”随机抽取，模型漏报候选时按全目录抽取。支持拖放或选择 PNG、JPG、GIF、WEBP、BMP 图片上传；上传后自动在两份目录文件中登记空标签条目，之后可直接编辑标签。支持重命名并同步更新图片文件名和目录引用；同名文件拒绝覆盖，单张最大 16 MiB。
 - 可选择浅色、Atri、洛茜主题；Atri 与洛茜使用内置插画背景。背景模糊、泛白和图片可见度可在主题页即时调整并保存在本机浏览器配置中。颜色模块提供 16 项界面调色变量，并按主题分别保存。
 - 可创建服务器根文件系统 tar.gz 在线归档快照，写入 OpenClaw-Debugger-Private\OpenClaw-Server-Backup 并生成含 SHA-256 的清单。
 - 服务器文件写入前会将原版本以 Windows DPAPI 加密存入 OpenClaw-Debugger-Private\Rollback。
@@ -31,6 +31,6 @@ Windows 本地桌面管理工具。界面使用 HTML/CSS/JavaScript 构建，由
 dotnet run --project .\OpenClawDebugger.csproj
 ```
 
-发布后可从 `bin\Release\net10.0-windows\OpenClawDebugger.exe` 启动。桌面快捷方式指向该构建目录。若终端中的 `ssh admin@106.14.173.90` 在同一 Windows 用户下可用，应用沿用当前 OpenSSH 身份；应用不生成、复制或要求输入 SSH 私钥。
+桌面快捷方式 OpenClaw-Debugger.lnk 当前指向 bin\WeightBuild\net10.0-windows\OpenClawDebugger.exe；新启动的窗口会加载最新界面。若终端中的 ssh admin@106.14.173.90 在同一 Windows 用户下可用，应用沿用当前 OpenSSH 身份，不复制或要求输入 SSH 私钥。
 
 整机归档覆盖服务器 `/` 的文件，并排除运行时虚拟目录 `/proc`、`/sys`、`/dev`、`/run`。它是遍历文件生成的在线归档，不是原子磁盘快照；备份期间仍在变化的文件可能前后不一致。
