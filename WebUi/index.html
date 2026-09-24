@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>OpenClaw Debugger</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="backdrop"></div><div class="backdrop-wash"></div>
+  <div class="app-shell">
+    <header class="topbar glass">
+      <div class="brand-lockup"><div class="brand-icon">✦</div><div><div class="eyebrow">LOCAL OPERATIONS CONSOLE</div><h1>OpenClaw <span>Debugger</span></h1></div></div>
+      <div class="connection-chip"><span class="pulse-dot"></span><span id="connectionStatus">尚未连接</span></div>
+      <div class="top-actions">
+        <button class="button button-quiet" id="refreshButton" disabled>⟳ <span>重新扫描</span></button>
+        <button class="button button-quiet" id="backupButton" disabled>▣ <span>备份服务器</span></button>
+        <button class="button button-primary" id="connectButton">⟷ <span>连接服务器</span></button>
+      </div>
+    </header>
+
+    <nav class="main-nav" aria-label="主导航">
+      <button class="nav-tab active" data-tab="overview"><span class="nav-shape"></span><span class="nav-label">概览</span></button>
+      <button class="nav-tab" data-tab="memory"><span class="nav-shape"></span><span class="nav-label">记忆</span></button>
+      <button class="nav-tab" data-tab="stickers"><span class="nav-shape"></span><span class="nav-label">表情包</span></button>
+      <button class="nav-tab" data-tab="themes"><span class="nav-shape"></span><span class="nav-label">主题</span></button>
+      <button class="nav-tab" data-tab="settings"><span class="nav-shape"></span><span class="nav-label">设置</span></button>
+      <div class="nav-indicator"></div>
+    </nav>
+
+    <main class="page-stack">
+      <section class="page active" id="page-overview">
+        <div class="welcome-row"><div><div class="eyebrow">WORKSPACE OVERVIEW</div><h2>服务器工作台</h2><p>管理 OpenClaw 记忆、表情包标签，并在本机保留加密回滚快照。</p></div><div class="server-pill"><span class="server-glyph">⌘</span><div><small>SSH 目标</small><strong id="targetSummary">admin@106.14.173.90</strong></div></div></div>
+        <div class="metric-grid">
+          <article class="metric-card glass"><div class="metric-icon cyan">▤</div><div><span>可编辑记忆</span><strong id="memoryCount">—</strong><small>工作区 Markdown</small></div></article>
+          <article class="metric-card glass"><div class="metric-icon coral">☺</div><div><span>表情包图片</span><strong id="stickerCount">—</strong><small>包含 GIF 动图</small></div></article>
+          <article class="metric-card glass"><div class="metric-icon gold">◈</div><div><span>本机回滚快照</span><strong class="metric-word">DPAPI</strong><small>写入前自动加密保存</small></div></article>
+        </div>
+        <div class="overview-grid">
+          <article class="panel glass"><div class="panel-heading"><div><div class="eyebrow">QUICK ACCESS</div><h3>快速开始</h3></div><span class="heading-mark">✦</span></div><div class="quick-actions"><button class="quick-card" data-go="memory"><span class="quick-icon">▤</span><strong>浏览记忆</strong><small>查看与安全修改服务器文档</small><b>→</b></button><button class="quick-card" data-go="stickers"><span class="quick-icon">☺</span><strong>管理表情包</strong><small>预览图片并同步标签清单</small><b>→</b></button><button class="quick-card" data-go="themes"><span class="quick-icon">◉</span><strong>调整外观</strong><small>切换背景、模糊与泛白程度</small><b>→</b></button></div></article>
+          <article class="panel glass server-card"><div class="panel-heading"><div><div class="eyebrow">SAFE BY DESIGN</div><h3>安全操作</h3></div><span class="shield">✓</span></div><ul class="safety-list"><li><i>01</i><span>覆盖前检查远端哈希，发现冲突时停止写入。</span></li><li><i>02</i><span>记忆与标签变更前，在私密目录生成 DPAPI 加密回滚副本。</span></li><li><i>03</i><span>整机备份以 tar.gz 快照保存，附带 SHA-256 清单。</span></li></ul></article>
+        </div>
+        <div class="path-ribbon glass"><span>⌂</span><div><small>远端管理路径</small><strong id="rootPathsText">连接后显示工作区和表情包目录</strong></div><button class="text-button" data-go="settings">设置路径 →</button></div>
+      </section>
+
+      <section class="page" id="page-memory">
+        <div class="section-heading"><div><div class="eyebrow">MEMORY FILES</div><h2>记忆管理</h2><p>选择 Markdown 文件查看内容。保存前会展示差异，并检查服务器版本。</p></div><div class="section-badge"><span id="memoryPageCount">0</span> 个可编辑文件</div></div>
+        <div class="workspace-layout">
+          <aside class="file-sidebar panel glass"><div class="side-title"><strong>工作区文件</strong><span id="memoryListCount">0</span></div><label class="search-box"><span>⌕</span><input id="memorySearch" type="search" placeholder="筛选文件"></label><div id="memoryList" class="file-list empty-state">连接服务器后读取文件</div></aside>
+          <article class="editor-panel panel glass"><div class="editor-toolbar"><div><div class="eyebrow">REMOTE DOCUMENT</div><h3 id="memoryTitle">选择左侧文件</h3><div class="muted small" id="memoryInfo">内容会在读取后显示。</div></div><div class="button-row"><button class="button button-quiet" id="editMemoryButton" disabled>编辑</button><button class="button button-quiet" id="cancelMemoryButton" disabled>放弃</button><button class="button button-primary" id="saveMemoryButton" disabled>保存修改</button></div></div><textarea id="memoryEditor" class="code-editor" spellcheck="false" placeholder="选择文件后，内容会显示在这里。" readonly></textarea><div class="editor-footer"><span id="memoryEditorState">只读预览</span><span>UTF-8 · Markdown</span></div></article>
+        </div>
+      </section>
+
+      <section class="page" id="page-stickers">
+        <div class="section-heading"><div><div class="eyebrow">STICKER LIBRARY</div><h2>表情包与标签</h2><p>支持 GIF 原生播放；标签保存时同步更新 catalog.json 和 MANIFEST.md。</p></div><div class="button-row"><button class="button button-quiet" id="rawStickerButton" disabled>高级编辑原始文件</button><button class="button button-primary" id="saveStickerButton" disabled>保存标签</button></div></div>
+        <div class="sticker-layout"><article class="panel glass sticker-catalog"><div class="side-title"><strong>图片目录</strong><span id="stickerListCount">0</span></div><label class="search-box"><span>⌕</span><input id="stickerSearch" type="search" placeholder="筛选名称或标签"></label><div id="stickerList" class="sticker-list empty-state">连接服务器后读取表情包</div></article><article class="panel glass sticker-preview"><div class="preview-head"><div><div class="eyebrow">LIVE PREVIEW</div><h3 id="stickerTitle">选择一张贴图</h3></div><span id="stickerFormat" class="format-chip">IMAGE</span></div><div class="image-stage" id="imageStage"><div class="placeholder-art"><span>☺</span><small>图片预览</small></div><img id="stickerImage" alt="表情包预览" hidden></div><div class="preview-meta"><div><small>标签</small><p id="selectedTags">选择图片后显示标签</p></div><span id="stickerSize" class="muted small"></span></div><div class="sticker-status" id="stickerStatus">连接后读取目录和标签格式。</div></article></div>
+      </section>
+
+      <section class="page" id="page-themes">
+        <div class="section-heading"><div><div class="eyebrow">PERSONALIZE YOUR WORKSPACE</div><h2>主题与背景</h2><p>选择主界面风格，并实时微调背景模糊与泛白强度。</p></div></div>
+        <div class="theme-layout"><div class="panel glass theme-panel"><div class="panel-heading"><div><div class="eyebrow">COLOR MOOD</div><h3>选择主题</h3></div></div><div class="theme-options"><button class="theme-option" data-theme="Atri"><span class="swatch atri-swatch"></span><span><strong>Atri</strong><small>薄荷与暖阳</small></span><i>✓</i></button><button class="theme-option" data-theme="Luoxi"><span class="swatch luoxi-swatch"></span><span><strong>洛茜</strong><small>玫瑰与书房</small></span><i>✓</i></button><button class="theme-option" data-theme="Light"><span class="swatch light-swatch"></span><span><strong>浅色</strong><small>清晰明亮</small></span><i>✓</i></button></div><div class="theme-preview-card"><div class="preview-sample-window"><div class="sample-bar"><i></i><i></i><i></i></div><div class="sample-content"><span></span><span></span><b></b></div></div><small>当前主界面预览</small></div></div><div class="panel glass tuning-panel"><div class="panel-heading"><div><div class="eyebrow">BACKGROUND TUNING</div><h3>背景效果</h3></div><button class="text-button" id="resetBackdrop">恢复默认</button></div><label class="range-control"><span><b>模糊程度</b><output id="blurOutput">2 px</output></span><input id="blurRange" type="range" min="0" max="24" step="1" value="2"><small>只模糊背景图层，界面文字和卡片保持清晰。</small></label><label class="range-control"><span><b>泛白程度</b><output id="washOutput">25%</output></span><input id="washRange" type="range" min="0" max="80" step="1" value="25"><small>调节背景上的浅色蒙层透明度。</small></label><label class="range-control"><span><b>背景图可见度</b><output id="imageOutput">90%</output></span><input id="imageRange" type="range" min="0" max="100" step="1" value="90"><small>效果会即时预览并保存在此电脑。</small></label><div class="tuning-note">拖动滑块即可立即看到变化。浅色主题使用纯色背景。</div></div></div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="section-heading"><div><div class="eyebrow">LOCAL CONFIGURATION</div><h2>连接设置</h2><p>连接信息和本地隐私目录保存在仓库之外。</p></div></div>
+        <div class="settings-layout"><article class="panel glass settings-panel"><div class="panel-heading"><div><div class="eyebrow">SSH CONNECTION</div><h3>服务器与路径</h3></div><span class="lock-mark">⌑</span></div><div class="form-grid"><label>服务器地址<input id="hostInput" autocomplete="off"></label><label>SSH 用户名<input id="usernameInput" autocomplete="off"></label><label>端口<input id="portInput" type="number" min="1" max="65535"></label><span></span><label class="wide-field">工作区路径<input id="workspaceInput" spellcheck="false"></label><label class="wide-field">表情包路径<input id="stickersInput" spellcheck="false"></label></div><div class="settings-actions"><button class="button button-primary" id="saveSettingsButton">保存设置</button><button class="button button-quiet" id="settingsConnectButton">保存并连接扫描</button></div></article><article class="panel glass private-panel"><div class="panel-heading"><div><div class="eyebrow">PRIVATE STORAGE</div><h3>本机私密目录</h3></div><span class="lock-mark">◈</span></div><p class="muted">连接配置、DPAPI 回滚副本和整机备份都保存在此目录，不会写入项目仓库。</p><div class="private-path" id="privatePath">—</div><button class="button button-quiet" id="openPrivateButton">在资源管理器中打开</button><div class="backup-location"><small>服务器快照目录</small><code id="backupPath">—</code></div><div class="warning-note">整机快照通过 SSH 读取根文件系统；需要服务器允许免密 sudo tar。</div></article></div>
+      </section>
+    </main>
+
+    <footer class="statusbar"><span class="status-orb"></span><span id="statusText">就绪</span><span class="status-tail">LOCAL · ENCRYPTED ROLLBACK</span></footer>
+  </div>
+
+  <dialog id="reviewDialog" class="modal review-modal"><form method="dialog"><div class="modal-head"><div><div class="eyebrow">CHANGE REVIEW</div><h3 id="reviewTitle">确认更改</h3></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><p class="muted">检查保存前后的内容。确认后才会写入服务器。</p><div class="diff-columns"><section><h4>保存前</h4><pre id="reviewBefore"></pre></section><section><h4>保存后</h4><pre id="reviewAfter"></pre></section></div><div class="modal-actions"><button class="button button-quiet" value="cancel">返回修改</button><button class="button button-primary" id="reviewConfirm" value="confirm">确认保存</button></div></form></dialog>
+  <dialog id="rawDialog" class="modal raw-modal"><form method="dialog"><div class="modal-head"><div><div class="eyebrow">ADVANCED EDITOR</div><h3>原始标签文件</h3></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div class="raw-editors"><label>catalog.json<textarea id="rawCatalog" spellcheck="false"></textarea></label><label>MANIFEST.md<textarea id="rawManifest" spellcheck="false"></textarea></label></div><div class="modal-actions"><button class="button button-quiet" value="cancel">关闭</button><button class="button button-primary" id="rawSaveButton" value="save">校验并保存</button></div></form></dialog>
+  <div id="toast" class="toast" role="status"></div>
+</body>
+</html>

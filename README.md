@@ -1,26 +1,36 @@
 # OpenClaw Debugger
 
-Windows 桌面管理工具，阶段一和阶段二实现范围：
+Windows 本地桌面管理工具。界面使用 HTML/CSS/JavaScript 构建，由 WPF WebView2 承载；SSH、文件范围校验、冲突检查、加密回滚和整机归档继续由 C# 服务处理。
 
-- 通过本机 Windows OpenSSH 连接服务器，复用当前用户的 SSH 配置、known_hosts 和登录身份。
-- 只读扫描 OpenClaw workspace Markdown、表情包目录及图片。
-- 浏览和编辑 MEMORY.md、USER.md、AGENTS.md、SOUL.md、DREAMS.md 和 memory 子目录中的 Markdown 文件。
-- 预览贴图，并在识别现有 catalog 结构后编辑标签；保存同步更新 catalog.json 与 MANIFEST.md。
-- 标签格式暂不兼容时，可通过“高级编辑原始标签文件”同时编辑两份文件。
-- 可选浅色、Atri、洛茜主题；Atri 与洛茜使用项目内置插画背景，并带柔焦与轻微泛白效果。主导航使用斜边分组标签，选中项切换为上圆角梯形。
-- 连接成功后可点击“备份服务器”，通过 SSH 在服务器上运行 sudo tar，将根文件系统 / 生成压缩快照，存入 OpenClaw-Debugger-Private\OpenClaw-Server-Backup 下的时间戳目录；同时保存快照清单和 SHA-256。快照包含其他挂载目录，排除运行时虚拟目录 /proc、/sys、/dev、/run。这是遍历文件生成的在线归档，不是原子磁盘快照；备份时仍在变化的文件可能前后不一致。服务器账号需能免密 sudo 执行 tar。
-- 写入前显示两侧内容，检查远程 SHA-256 冲突，并将原版本以 Windows DPAPI 加密存入仓库旁的 OpenClaw-Debugger-Private\Rollback。
+## 当前功能
+
+- 通过本机 Windows OpenSSH 连接服务器，复用当前 Windows 用户的 SSH 配置、known_hosts 和登录身份。
+- 只读扫描 OpenClaw 工作区 Markdown、表情包目录及图片。
+- 浏览并编辑工作区记忆 Markdown 文件。保存前显示完整内容差异、重新读取远端并校验 SHA-256。
+- 预览贴图与原生 GIF 动图；标签编辑支持先预览 catalog.json 和 MANIFEST.md 的差异，再同步写入两份文件。
+- 可选择浅色、Atri、洛茜主题；Atri 与洛茜使用内置插画背景。背景模糊、泛白和图片可见度可在主题页即时调整并保存在本机浏览器配置中。
+- 可创建服务器根文件系统 tar.gz 在线归档快照，写入 OpenClaw-Debugger-Private\OpenClaw-Server-Backup 并生成含 SHA-256 的清单。
+- 服务器文件写入前会将原版本以 Windows DPAPI 加密存入 OpenClaw-Debugger-Private\Rollback。
+
+## 架构与安全边界
+
+- `WebUi/` 包含界面结构、样式和交互逻辑。图片背景作为静态资源复制到运行目录。
+- `MainWindow.xaml` 只保留桌面窗口与 WebView2。
+- `MainWindow.xaml.cs` 处理来自固定本地来源 `https://openclaw.local` 的类型化消息。它只允许预先定义的连接、读取、写入、预览、设置、打开目录和备份操作，不接受任意 shell 命令。
+- WebView2 禁用开发者工具、默认上下文菜单和宿主对象；阻止离开本地 UI 的导航。UI 通过虚拟主机映射加载，不启用远程 CDN。
+- 远端路径仍由 `RemoteOpenClawClient` 校验；写入带哈希冲突检查。服务器 tar 使用应用内固定命令，归档数据流直接写入本机备份目录。
+- 本机连接设置、私密回滚副本和备份保存在仓库外的 `OpenClaw-Debugger-Private`，不会被加入 Git。
 
 ## 启动
 
-需要 Windows、.NET 10 Desktop Runtime、Windows OpenSSH Client，以及服务器上的 Python 3。整机快照还要求服务器账号可免密 sudo 执行 tar。
+需要 Windows、.NET 10 Desktop Runtime、Microsoft Edge WebView2 Runtime、Windows OpenSSH Client，以及服务器上的 Python 3。整机快照还要求服务器账号可以免密执行 `sudo tar`。
 
-运行命令：dotnet run --project .\OpenClawDebugger.csproj
+开发启动：
 
-应用默认使用项目背景中记录的服务器、工作区和 stickers 路径。连接在当前 Windows 用户上下文中发起；应用不保存、生成、复制或要求输入 SSH 私钥。严格校验 SSH 主机指纹。如果终端里的 ssh admin@106.14.173.90 在同一 Windows 用户下可用，应用沿用相同的 OpenSSH 身份。
+```powershell
+dotnet run --project .\OpenClawDebugger.csproj
+```
 
-受管文件路径都经过固定范围校验；文本与图片操作通过 SSH 标准输入交给固定 Python helper 处理，界面不接受任意远程 shell 命令。整机快照使用固定的 sudo tar 命令，其二进制归档通过 SSH 标准输出流传回本机。图片只在选择预览时读取。远程内容不写入应用仓库。
+发布后可从 `bin\Release\net10.0-windows\OpenClawDebugger.exe` 启动。桌面快捷方式指向该构建目录。若终端中的 `ssh admin@106.14.173.90` 在同一 Windows 用户下可用，应用沿用当前 OpenSSH 身份；应用不生成、复制或要求输入 SSH 私钥。
 
-## 私密数据
-
-私密目录为 OpenClaw-Debugger 的相邻目录 OpenClaw-Debugger-Private。settings.json 保存连接路径等非凭证配置；Rollback 中的内容快照由 Windows DPAPI 加密。SSH 密钥继续由 Windows OpenSSH 原有配置管理，不复制到该目录或 Git 仓库。
+整机归档覆盖服务器 `/` 的文件，并排除运行时虚拟目录 `/proc`、`/sys`、`/dev`、`/run`。它是遍历文件生成的在线归档，不是原子磁盘快照；备份期间仍在变化的文件可能前后不一致。
