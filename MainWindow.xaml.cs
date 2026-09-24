@@ -770,7 +770,7 @@ public partial class MainWindow : Window
         SetBusy(true);
         try
         {
-            var progress = new Progress<long>(bytes => SendProgress("backup", new { bytes }));
+            var progress = new Progress<ServerSnapshotProgress>(snapshotProgress => SendProgress("backup", snapshotProgress));
             var result = await new LocalServerBackupStore(SettingsRepository.DefaultBackupDirectory)
                 .CreateAsync(_settings.Connection, _remote, progress);
             return new { directory = result.Directory, archivePath = result.ArchivePath, archiveBytes = result.ArchiveBytes, sha256 = result.Sha256 };

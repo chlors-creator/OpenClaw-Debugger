@@ -55,11 +55,12 @@
       const id = String(++requestId);
       pending.set(id, { resolve, reject });
       window.chrome.webview.postMessage({ id: id, command: command, payload: payload || {} });
+      const timeoutMs = command === 'backup' ? 25 * 60 * 60 * 1000 : 300000;
       window.setTimeout(() => {
         if (!pending.has(id)) return;
         pending.delete(id);
         reject(new Error('操作等待超时，请检查连接后重试。'));
-      }, 300000);
+      }, timeoutMs);
     });
   }
 
@@ -67,10 +68,7 @@
     const message = event.data || {};
     if (message.type === 'progress') {
       if (message.command === 'busy') setBusy(Boolean(message.data && message.data.busy));
-      if (message.command === 'backup') {
-        const bytes = Number(message.data && message.data.bytes) || 0;
-        setStatus('正在接收整机快照：' + (bytes / 1048576).toFixed(1) + ' MiB');
-      }
+      if (message.command === 'backup') renderBackupProgress(message.data || {});
       return;
     }
     if (!message.id || !pending.has(String(message.id))) return;
@@ -125,10 +123,86 @@
   }
 
   function sizeLabel(size) {
-    const value = Number(size) || 0;
-    if (value < 1024) return value + ' B';
-    if (value < 1048576) return (value / 1024).toFixed(1) + ' KB';
-    return (value / 1048576).toFixed(1) + ' MB';
+    const value = Math.max(0, Number(size) || 0);
+    if (value < 1024) return value.toFixed(value < 10 && value % 1 ? 1 : 0) + ' B';
+    if (value < 1048576) return (value / 1024).toFixed(1) + ' KiB';
+    if (value < 1073741824) return (value / 1048576).toFixed(1) + ' MiB';
+    if (value < 1099511627776) return (value / 1073741824).toFixed(2) + ' GiB';
+    return (value / 1099511627776).toFixed(2) + ' TiB';
+  }
+
+  function etaLabel(seconds) {
+    if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '计算中';
+    const total = Math.max(0, Math.ceil(Number(seconds)));
+    if (total < 60) return '约 ' + total + ' 秒';
+    const minutes = Math.floor(total / 60);
+    const remainingSeconds = total % 60;
+    if (minutes < 60) return '约 ' + minutes + ' 分 ' + remainingSeconds + ' 秒';
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return '约 ' + hours + ' 小时 ' + remainingMinutes + ' 分';
+  }
+
+  function renderBackupProgress(data) {
+    const panel = $('#backupProgress');
+    const phase = data.phase || 'estimating';
+    const bytes = Math.max(0, Number(data.bytes) || 0);
+    const total = data.totalBytes === null || data.totalBytes === undefined ? null : Math.max(0, Number(data.totalBytes) || 0);
+    const speed = Number(data.bytesPerSecond) || 0;
+    const overEstimate = phase === 'transferring' && total > 0 && bytes > total;
+    panel.hidden = false;
+    panel.dataset.phase = phase;
+    $('#backupTransferred').textContent = sizeLabel(bytes);
+    $('#backupSpeed').textContent = speed > 0 ? sizeLabel(speed) + '/s' : '计算中';
+    $('#backupTotalSize').textContent = total > 0
+      ? (overEstimate ? '超过 ' + sizeLabel(total) + '（预估）' : sizeLabel(total) + (phase === 'transferring' ? '（预估）' : ''))
+      : '计算中';
+
+    const track = $('#backupProgressTrack');
+    const bar = $('#backupProgressBar');
+    if (phase === 'estimating') {
+      $('#backupProgressTitle').textContent = '正在估算快照总大小';
+      $('#backupProgressDetail').textContent = '先完整压缩计数一次（不留服务器临时包），再正式传输；文件变化可能造成估算偏差';
+      $('#backupProgressPercent').textContent = '扫描中';
+      $('#backupEta').textContent = '估算中';
+      track.setAttribute('aria-busy', 'true');
+      track.removeAttribute('aria-valuenow');
+      bar.style.width = '';
+      setStatus('正在扫描服务器并估算快照大小…');
+      return;
+    }
+
+    track.removeAttribute('aria-busy');
+    if (phase === 'transferring') {
+      const percent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
+      $('#backupProgressTitle').textContent = '正在传输服务器快照';
+      $('#backupProgressDetail').textContent = overEstimate ? '传输量已超过预估，仍在接收归档数据' : '正在通过 SSH 接收 gzip 归档';
+      $('#backupProgressPercent').textContent = overEstimate ? '调整中' : percent + '%';
+      $('#backupEta').textContent = overEstimate ? '大小变化，重新估算中' : etaLabel(data.remainingSeconds);
+      track.setAttribute('aria-valuenow', String(percent));
+      bar.style.width = percent + '%';
+      setStatus('正在传输服务器快照：' + sizeLabel(bytes) + (total > 0 ? ' / 约 ' + sizeLabel(total) : '') + (speed > 0 ? ' · ' + sizeLabel(speed) + '/s' : ''));
+      return;
+    }
+
+    const completed = phase === 'completed';
+    const finalPercent = completed ? 100 : 99;
+    $('#backupProgressTitle').textContent = completed ? '服务器快照已完成' : '正在保存快照与校验清单';
+    $('#backupProgressDetail').textContent = completed ? '归档已写入本机，并已生成 SHA-256 清单' : '数据传输完成，正在刷新文件并写入 SHA-256 清单';
+    $('#backupProgressPercent').textContent = completed ? '100%' : '完成传输';
+    $('#backupTotalSize').textContent = sizeLabel(bytes);
+    $('#backupEta').textContent = completed ? '已完成' : '即将完成';
+    track.setAttribute('aria-valuenow', String(finalPercent));
+    bar.style.width = finalPercent + '%';
+    setStatus(completed ? '服务器快照已完成：' + sizeLabel(bytes) : '数据传输完成，正在写入快照清单…');
+  }
+
+  function resetBackupProgress() {
+    const panel = $('#backupProgress');
+    panel.hidden = true;
+    panel.dataset.phase = '';
+    $('#backupProgressTrack').setAttribute('aria-valuenow', '0');
+    $('#backupProgressBar').style.width = '0%';
   }
 
   function switchTab(name) {
@@ -661,15 +735,21 @@
     if (!$('.connection-chip').classList.contains('connected')) return;
     $('#backupButton').disabled = true;
     $('#backupButton').innerHTML = '◌ <span>正在备份…</span>';
-    setStatus('正在创建整个服务器根文件系统快照…');
+    renderBackupProgress({ phase: 'estimating', bytes: 0, totalBytes: null });
+    setStatus('正在扫描服务器并估算快照大小…');
     try {
       const result = await bridgeCall('backup', {});
+      renderBackupProgress({ phase: 'completed', bytes: result.archiveBytes, totalBytes: result.archiveBytes });
       setStatus('整机快照完成：' + sizeLabel(result.archiveBytes) + ' · SHA-256 ' + result.sha256);
       showToast('服务器快照已完成：' + result.directory);
       const okay = window.confirm('服务器快照已完成。\n\n位置：' + result.directory + '\n压缩包：' + result.archivePath + '\n大小：' + sizeLabel(result.archiveBytes) + '\nSHA-256：' + result.sha256 + '\n\n是否打开备份目录？');
       if (okay) await bridgeCall('openBackupFolder', {});
     } catch (error) { reportError(error); }
-    finally { $('#backupButton').innerHTML = '▣ <span>备份服务器</span>'; $('#backupButton').disabled = false; }
+    finally {
+      $('#backupButton').innerHTML = '▣ <span>备份服务器</span>';
+      $('#backupButton').disabled = !$('.connection-chip').classList.contains('connected');
+      resetBackupProgress();
+    }
   }
 
   function openRawEditor() {

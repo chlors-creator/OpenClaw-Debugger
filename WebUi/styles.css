@@ -34,3 +34,21 @@ body.theme-light .file-row.selected,body.theme-light .sticker-row.selected{backg
 .preview-actions{display:flex;align-items:center;gap:8px}.preview-actions .button{padding:7px 10px;font-size:10px}.sticker-thumb{position:relative;overflow:hidden;flex:0 0 52px}.sticker-thumb-fallback{position:absolute;inset:0;display:grid;place-items:center;transition:opacity .18s}.sticker-thumb-image{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .18s;background:color-mix(in srgb,var(--palette-surface) 25%,transparent)}.sticker-thumb.has-image .sticker-thumb-image{opacity:1}.sticker-thumb.has-image .sticker-thumb-fallback{opacity:0}.sticker-thumb.thumbnail-unavailable .sticker-thumb-fallback{opacity:1}.rename-modal{width:min(460px,92vw)}.rename-field{display:flex;flex-direction:column;gap:7px;color:var(--muted);font-size:11px}.rename-field input{width:100%;height:42px;padding:0 12px;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--palette-surface) 70%,transparent);color:var(--ink);font:12px 'Cascadia Code',Consolas,monospace;outline:none}.rename-field input:focus{border-color:var(--accent)}
 
 .sticker-row-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}.sticker-weight-control{display:flex;align-items:center;gap:6px;color:var(--muted2);font-size:9px;white-space:nowrap}.sticker-weight-input{width:76px;height:32px;padding:0 7px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--palette-surface) 70%,transparent);color:var(--ink);font:11px 'Cascadia Code',Consolas,monospace;outline:none}.sticker-weight-input:focus{border-color:var(--accent)}.sticker-weight-input:disabled{opacity:.5}
+
+.backup-progress{flex:0 0 auto;padding:12px 16px;border-radius:16px;display:flex;flex-direction:column;gap:9px;animation:backup-progress-in .24s ease-out}
+.backup-progress-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.backup-progress-title{display:flex;align-items:center;gap:10px;min-width:0}
+.backup-progress-icon{width:34px;height:34px;display:grid;place-items:center;flex:0 0 34px;border-radius:11px;background:color-mix(in srgb,var(--palette-accent) 15%,transparent);color:var(--palette-accent);font-size:17px}
+.backup-progress-title>span:last-child{display:flex;flex-direction:column;gap:3px;min-width:0}
+.backup-progress-title strong{font-size:11px}
+.backup-progress-title small{font-size:9px;color:var(--muted2)}
+.backup-progress-percent{font:700 11px 'Cascadia Code',Consolas,monospace;color:var(--palette-accent);white-space:nowrap}
+.backup-progress-track{height:7px;overflow:hidden;border-radius:99px;background:color-mix(in srgb,var(--palette-surface) 70%,transparent);border:1px solid var(--line)}
+.backup-progress-track span{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--palette-highlight),var(--palette-accent));box-shadow:0 0 12px color-mix(in srgb,var(--palette-accent) 45%,transparent);transition:width .28s ease}
+.backup-progress[data-phase=estimating] .backup-progress-track span{width:34%;animation:backup-estimating 1.35s ease-in-out infinite}
+.backup-progress-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;color:var(--muted2);font-size:9px}
+.backup-progress-stats span{display:flex;align-items:baseline;gap:5px;min-width:0;white-space:nowrap}
+.backup-progress-stats b{overflow:hidden;text-overflow:ellipsis;color:var(--ink);font:600 10px 'Cascadia Code',Consolas,monospace}
+@keyframes backup-progress-in{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}
+@keyframes backup-estimating{0%{transform:translateX(-115%)}100%{transform:translateX(315%)}}
+@media(max-width:780px){.backup-progress-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.backup-progress-stats span{justify-content:space-between}}

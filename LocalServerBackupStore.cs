@@ -25,7 +25,7 @@ public sealed class LocalServerBackupStore(string rootDirectory)
     public async Task<ServerSnapshotResult> CreateAsync(
         ConnectionSettings settings,
         RemoteOpenClawClient remote,
-        IProgress<long>? progress = null,
+        IProgress<ServerSnapshotProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(RootDirectory);
@@ -36,12 +36,16 @@ public sealed class LocalServerBackupStore(string rootDirectory)
 
         try
         {
+            progress?.Report(new ServerSnapshotProgress("estimating", 0, null, null, null));
+            var estimatedTotalBytes = await remote.EstimateServerSnapshotSizeAsync(settings, cancellationToken);
+            progress?.Report(new ServerSnapshotProgress("transferring", 0, estimatedTotalBytes, null, null));
+
             RemoteSnapshotTransferResult transfer;
             await using (var output = new FileStream(
                 archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
-                transfer = await remote.WriteServerSnapshotAsync(settings, output, progress, cancellationToken);
+                transfer = await remote.WriteServerSnapshotAsync(settings, output, estimatedTotalBytes, progress, cancellationToken);
                 await output.FlushAsync(cancellationToken);
                 output.Flush(flushToDisk: true);
             }
@@ -65,6 +69,7 @@ public sealed class LocalServerBackupStore(string rootDirectory)
             var backupName = $"{created:yyyyMMdd-HHmmss}_{Guid.NewGuid().ToString("N")[..8]}";
             var finalDirectory = Path.Combine(RootDirectory, backupName);
             Directory.Move(staging, finalDirectory);
+            progress?.Report(new ServerSnapshotProgress("completed", transfer.Bytes, transfer.Bytes, null, 0));
             return new ServerSnapshotResult(
                 finalDirectory,
                 Path.Combine(finalDirectory, archiveName),
