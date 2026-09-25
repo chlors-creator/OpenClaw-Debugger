@@ -21,27 +21,28 @@
       </div>
     </header>
 
-    <section class="backup-progress panel glass" id="backupProgress" hidden role="status" aria-live="polite">
-      <div class="backup-progress-heading">
-        <div class="backup-progress-title"><span class="backup-progress-icon">▣</span><span><strong id="backupProgressTitle">正在准备服务器快照</strong><small id="backupProgressDetail">准备开始</small></span></div>
-        <strong class="backup-progress-percent" id="backupProgressPercent">—</strong>
-      </div>
-      <div class="backup-progress-track" id="backupProgressTrack" role="progressbar" aria-label="服务器备份进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="backupProgressBar"></span></div>
-      <div class="backup-progress-stats">
-        <span>预计总大小 <b id="backupTotalSize">计算中</b></span>
-        <span>已传输 <b id="backupTransferred">0 B</b></span>
-        <span>传输速度 <b id="backupSpeed">—</b></span>
-        <span>预计剩余 <b id="backupEta">计算中</b></span>
-      </div>
-    </section>
-
     <nav class="main-nav" aria-label="主导航">
-      <button class="nav-tab active" data-tab="overview"><span class="nav-shape"></span><span class="nav-label">概览</span></button>
-      <button class="nav-tab" data-tab="memory"><span class="nav-shape"></span><span class="nav-label">记忆</span></button>
-      <button class="nav-tab" data-tab="stickers"><span class="nav-shape"></span><span class="nav-label">表情包</span></button>
-      <button class="nav-tab" data-tab="themes"><span class="nav-shape"></span><span class="nav-label">主题</span></button>
-      <button class="nav-tab" data-tab="settings"><span class="nav-shape"></span><span class="nav-label">设置</span></button>
-      <div class="nav-indicator"></div>
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-tab="overview"><span class="nav-shape"></span><span class="nav-label">概览</span></button>
+        <button class="nav-tab" data-tab="memory"><span class="nav-shape"></span><span class="nav-label">记忆</span></button>
+        <button class="nav-tab" data-tab="stickers"><span class="nav-shape"></span><span class="nav-label">表情包</span></button>
+        <button class="nav-tab" data-tab="themes"><span class="nav-shape"></span><span class="nav-label">主题</span></button>
+        <button class="nav-tab" data-tab="settings"><span class="nav-shape"></span><span class="nav-label">设置</span></button>
+        <div class="nav-indicator"></div>
+      </div>
+      <section class="backup-progress glass" id="backupProgress" hidden role="status" aria-live="polite">
+        <div class="backup-progress-heading">
+          <div class="backup-progress-title"><span class="backup-progress-icon">▣</span><span><strong id="backupProgressTitle">服务器快照</strong><small id="backupProgressDetail">备份尚未开始</small></span></div>
+          <strong class="backup-progress-percent" id="backupProgressPercent">—</strong>
+        </div>
+        <div class="backup-progress-track" id="backupProgressTrack" role="progressbar" aria-label="服务器备份进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="backupProgressBar"></span></div>
+        <div class="backup-progress-stats">
+          <span><small>预计总量</small><b id="backupTotalSize">计算中</b></span>
+          <span><small>已传输</small><b id="backupTransferred">0 B</b></span>
+          <span><small>传输速度</small><b id="backupSpeed">—</b></span>
+          <span><small>预计剩余</small><b id="backupEta">计算中</b></span>
+        </div>
+      </section>
     </nav>
 
     <main class="page-stack">

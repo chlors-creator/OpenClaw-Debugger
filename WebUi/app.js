@@ -55,7 +55,7 @@
       const id = String(++requestId);
       pending.set(id, { resolve, reject });
       window.chrome.webview.postMessage({ id: id, command: command, payload: payload || {} });
-      const timeoutMs = command === 'backup' ? 25 * 60 * 60 * 1000 : 300000;
+      const timeoutMs = command === 'backup' ? 200 * 60 * 60 * 1000 : 300000;
       window.setTimeout(() => {
         if (!pending.has(id)) return;
         pending.delete(id);
@@ -143,27 +143,34 @@
     return '约 ' + hours + ' 小时 ' + remainingMinutes + ' 分';
   }
 
+  let lastBackupProgress = null;
+
   function renderBackupProgress(data) {
+    lastBackupProgress = data;
     const panel = $('#backupProgress');
     const phase = data.phase || 'estimating';
     const bytes = Math.max(0, Number(data.bytes) || 0);
     const total = data.totalBytes === null || data.totalBytes === undefined ? null : Math.max(0, Number(data.totalBytes) || 0);
     const speed = Number(data.bytesPerSecond) || 0;
+    const attempt = Math.max(1, Number(data.attempt) || 1);
+    const maxAttempts = Math.max(1, Number(data.maxAttempts) || 1);
+    const attemptLabel = attempt + '/' + maxAttempts;
     const overEstimate = phase === 'transferring' && total > 0 && bytes > total;
     panel.hidden = false;
     panel.dataset.phase = phase;
     $('#backupTransferred').textContent = sizeLabel(bytes);
-    $('#backupSpeed').textContent = speed > 0 ? sizeLabel(speed) + '/s' : '计算中';
+    $('#backupSpeed').textContent = speed > 0 ? sizeLabel(speed) + '/s' : '—';
     $('#backupTotalSize').textContent = total > 0
-      ? (overEstimate ? '超过 ' + sizeLabel(total) + '（预估）' : sizeLabel(total) + (phase === 'transferring' ? '（预估）' : ''))
+      ? (overEstimate ? '超过 ' + sizeLabel(total) + '（预估）' : sizeLabel(total) + (phase === 'transferring' || phase === 'retrying' ? '（预估）' : ''))
       : '计算中';
 
     const track = $('#backupProgressTrack');
     const bar = $('#backupProgressBar');
     if (phase === 'estimating') {
-      $('#backupProgressTitle').textContent = '正在估算快照总大小';
-      $('#backupProgressDetail').textContent = '先完整压缩计数一次（不留服务器临时包），再正式传输；文件变化可能造成估算偏差';
+      $('#backupProgressTitle').textContent = attempt > 1 ? '重试估算 · ' + attemptLabel : '正在估算快照总大小';
+      $('#backupProgressDetail').textContent = '正在扫描并压缩计数；此阶段尚未传输归档数据';
       $('#backupProgressPercent').textContent = '扫描中';
+      $('#backupSpeed').textContent = '未开始';
       $('#backupEta').textContent = '估算中';
       track.setAttribute('aria-busy', 'true');
       track.removeAttribute('aria-valuenow');
@@ -172,11 +179,25 @@
       return;
     }
 
+    if (phase === 'retrying') {
+      $('#backupProgressTitle').textContent = '网络波动，正在自动重试 · ' + attemptLabel;
+      $('#backupProgressDetail').textContent = data.message || 'SSH 连接中断，等待恢复后重新传输';
+      $('#backupProgressPercent').textContent = '重连中';
+      $('#backupTransferred').textContent = '0 B';
+      $('#backupSpeed').textContent = '连接恢复中';
+      $('#backupEta').textContent = '等待重试';
+      track.setAttribute('aria-busy', 'true');
+      track.removeAttribute('aria-valuenow');
+      bar.style.width = '';
+      setStatus($('#backupProgressDetail').textContent);
+      return;
+    }
+
     track.removeAttribute('aria-busy');
     if (phase === 'transferring') {
       const percent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
       $('#backupProgressTitle').textContent = '正在传输服务器快照';
-      $('#backupProgressDetail').textContent = overEstimate ? '传输量已超过预估，仍在接收归档数据' : '正在通过 SSH 接收 gzip 归档';
+      $('#backupProgressDetail').textContent = overEstimate ? '传输量已超过预估，仍在接收归档数据' : 'SSH 连接 · 第 ' + attemptLabel + ' 次';
       $('#backupProgressPercent').textContent = overEstimate ? '调整中' : percent + '%';
       $('#backupEta').textContent = overEstimate ? '大小变化，重新估算中' : etaLabel(data.remainingSeconds);
       track.setAttribute('aria-valuenow', String(percent));
@@ -185,26 +206,33 @@
       return;
     }
 
+    if (phase === 'failed') {
+      $('#backupProgressTitle').textContent = '备份已中断';
+      $('#backupProgressDetail').textContent = data.message || '自动重试已结束；网络恢复后可再次点击“备份服务器”';
+      $('#backupProgressPercent').textContent = '已停止';
+      $('#backupTransferred').textContent = '临时数据已清理';
+      $('#backupSpeed').textContent = '—';
+      $('#backupEta').textContent = '可重新备份';
+      track.setAttribute('aria-valuenow', '0');
+      bar.style.width = '0%';
+      setStatus($('#backupProgressDetail').textContent, true);
+      return;
+    }
+
     const completed = phase === 'completed';
+    const finalizing = phase === 'finalizing';
     const finalPercent = completed ? 100 : 99;
     $('#backupProgressTitle').textContent = completed ? '服务器快照已完成' : '正在保存快照与校验清单';
-    $('#backupProgressDetail').textContent = completed ? '归档已写入本机，并已生成 SHA-256 清单' : '数据传输完成，正在刷新文件并写入 SHA-256 清单';
+    $('#backupProgressDetail').textContent = completed ? '归档和 SHA-256 清单已写入本机' : '数据传输完成，正在刷新文件并写入清单';
     $('#backupProgressPercent').textContent = completed ? '100%' : '完成传输';
-    $('#backupTotalSize').textContent = sizeLabel(bytes);
-    $('#backupEta').textContent = completed ? '已完成' : '即将完成';
+    $('#backupTotalSize').textContent = sizeLabel(total || bytes);
+    $('#backupTransferred').textContent = sizeLabel(bytes);
+    $('#backupSpeed').textContent = speed > 0 ? sizeLabel(speed) + '/s' : '—';
+    $('#backupEta').textContent = completed ? '已完成' : (finalizing ? '即将完成' : '已完成');
     track.setAttribute('aria-valuenow', String(finalPercent));
     bar.style.width = finalPercent + '%';
     setStatus(completed ? '服务器快照已完成：' + sizeLabel(bytes) : '数据传输完成，正在写入快照清单…');
   }
-
-  function resetBackupProgress() {
-    const panel = $('#backupProgress');
-    panel.hidden = true;
-    panel.dataset.phase = '';
-    $('#backupProgressTrack').setAttribute('aria-valuenow', '0');
-    $('#backupProgressBar').style.width = '0%';
-  }
-
   function switchTab(name) {
     currentTab = name;
     $$('.nav-tab').forEach(button => button.classList.toggle('active', button.dataset.tab === name));
@@ -735,7 +763,8 @@
     if (!$('.connection-chip').classList.contains('connected')) return;
     $('#backupButton').disabled = true;
     $('#backupButton').innerHTML = '◌ <span>正在备份…</span>';
-    renderBackupProgress({ phase: 'estimating', bytes: 0, totalBytes: null });
+    lastBackupProgress = null;
+    renderBackupProgress({ phase: 'estimating', bytes: 0, totalBytes: null, attempt: 1, maxAttempts: 8 });
     setStatus('正在扫描服务器并估算快照大小…');
     try {
       const result = await bridgeCall('backup', {});
@@ -744,14 +773,15 @@
       showToast('服务器快照已完成：' + result.directory);
       const okay = window.confirm('服务器快照已完成。\n\n位置：' + result.directory + '\n压缩包：' + result.archivePath + '\n大小：' + sizeLabel(result.archiveBytes) + '\nSHA-256：' + result.sha256 + '\n\n是否打开备份目录？');
       if (okay) await bridgeCall('openBackupFolder', {});
-    } catch (error) { reportError(error); }
-    finally {
+    } catch (error) {
+      reportError(error);
+      const last = lastBackupProgress || {};
+      renderBackupProgress({ phase: 'failed', bytes: 0, totalBytes: last.totalBytes, message: error && error.message ? error.message : String(error) });
+    } finally {
       $('#backupButton').innerHTML = '▣ <span>备份服务器</span>';
       $('#backupButton').disabled = !$('.connection-chip').classList.contains('connected');
-      resetBackupProgress();
     }
   }
-
   function openRawEditor() {
     if (!stickerEditingEnabled) return;
     $('#rawCatalog').value = originalCatalog;

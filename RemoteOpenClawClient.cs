@@ -11,7 +11,18 @@ namespace OpenClawDebugger;
 
 public sealed record RemoteStickerUploadResult(string RelativePath, long Size, string Sha256);
 public sealed record RemoteStickerRenameResult(string RelativePath, long Size, string Sha256);
-public sealed record ServerSnapshotProgress(string Phase, long Bytes, long? TotalBytes, double? BytesPerSecond, long? RemainingSeconds);
+public sealed record ServerSnapshotProgress(
+    string Phase,
+    long Bytes,
+    long? TotalBytes,
+    double? BytesPerSecond,
+    long? RemainingSeconds,
+    int Attempt = 1,
+    int MaxAttempts = 1,
+    string? Message = null);
+
+public sealed class SnapshotTransferInterruptedException(string message, Exception? innerException = null)
+    : IOException(message, innerException);
 
 public sealed class RemoteOpenClawClient
 {
@@ -450,6 +461,11 @@ except Exception as e:
             if (cancellationToken.IsCancellationRequested) throw;
             throw new TimeoutException("服务器快照大小估算超过 12 小时，操作已中止。");
         }
+        catch (IOException ex) when (ex is not SnapshotTransferInterruptedException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new SnapshotTransferInterruptedException("SSH 连接在估算快照大小时中断。", ex);
+        }
         finally
         {
             if (!process.HasExited)
@@ -504,10 +520,16 @@ except Exception as e:
             var headerRead = 0;
             while (headerRead < gzipHeader.Length)
             {
-                var read = await process.StandardOutput.BaseStream.ReadAsync(
-                    gzipHeader.AsMemory(headerRead), timeout.Token);
+                var read = await ReadSnapshotOutputAsync(
+                    process.StandardOutput.BaseStream, gzipHeader.AsMemory(headerRead), timeout.Token);
                 if (read == 0)
+                {
+                    await process.WaitForExitAsync(timeout.Token);
+                    var headerError = await stderrTask;
+                    if (process.ExitCode != 0)
+                        throw CreateSnapshotFailure(headerError, process.ExitCode);
                     throw new InvalidDataException("服务器没有返回完整的 gzip 快照头。");
+                }
                 headerRead += read;
             }
             if (gzipHeader[0] != 0x1f || gzipHeader[1] != 0x8b)
@@ -518,7 +540,7 @@ except Exception as e:
 
             while (true)
             {
-                var read = await process.StandardOutput.BaseStream.ReadAsync(buffer.AsMemory(), timeout.Token);
+                var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, buffer, timeout.Token);
                 if (read == 0) break;
                 await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
                 hash.AppendData(buffer, 0, read);
@@ -572,13 +594,17 @@ except Exception as e:
         start.ArgumentList.Add("-o");
         start.ArgumentList.Add("ConnectTimeout=12");
         start.ArgumentList.Add("-o");
+        start.ArgumentList.Add("ServerAliveInterval=15");
+        start.ArgumentList.Add("-o");
+        start.ArgumentList.Add("ServerAliveCountMax=3");
+        start.ArgumentList.Add("-o");
         start.ArgumentList.Add("LogLevel=ERROR");
         start.ArgumentList.Add("-p");
         start.ArgumentList.Add(settings.Port.ToString(CultureInfo.InvariantCulture));
         start.ArgumentList.Add(settings.Target);
     }
 
-    private static InvalidOperationException CreateSnapshotFailure(string error, int exitCode)
+    private static Exception CreateSnapshotFailure(string error, int exitCode)
     {
         var detail = string.Join(Environment.NewLine,
             error.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Take(8));
@@ -593,9 +619,37 @@ except Exception as e:
             return new InvalidOperationException("完整服务器快照需要 admin 对 tar 命令具备 root 权限。");
         if (detail.Contains("REMOTE HOST IDENTIFICATION HAS CHANGED", StringComparison.OrdinalIgnoreCase))
             return new InvalidOperationException("服务器 SSH 主机指纹发生变化，快照已取消。");
+        if (exitCode == 255 || IsTransientSshFailure(detail))
+            return new SnapshotTransferInterruptedException(string.IsNullOrWhiteSpace(detail)
+                ? "SSH 网络连接中断。"
+                : "SSH 网络连接中断：" + detail);
         return new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
             ? $"服务器快照失败，SSH 退出码 {exitCode}。"
             : $"服务器快照失败：{detail}");
+    }
+
+    private static bool IsTransientSshFailure(string detail)
+    {
+        string[] transientMessages =
+        [
+            "connection reset", "connection timed out", "connection timeout", "connection closed",
+            "connection refused", "broken pipe", "network is unreachable", "no route to host",
+            "operation timed out", "software caused connection abort", "connection aborted",
+            "client_loop: send disconnect", "kex_exchange_identification", "could not resolve hostname"
+        ];
+        return transientMessages.Any(message => detail.Contains(message, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static async Task<int> ReadSnapshotOutputAsync(Stream source, Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await source.ReadAsync(buffer, cancellationToken);
+        }
+        catch (IOException ex)
+        {
+            throw new SnapshotTransferInterruptedException("SSH 数据流在传输服务器快照时中断。", ex);
+        }
     }
 
     private static async Task<JsonObject> InvokeAsync(
