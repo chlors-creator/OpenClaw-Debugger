@@ -32,6 +32,8 @@ public partial class MainWindow : Window
     private ParsedStickerCatalog? _catalog;
     private bool _serverConnected;
     private bool _busy;
+    private BackupPauseController? _backupPauseController;
+    private ServerSnapshotProgress? _lastBackupProgress;
     private bool _hasDrafts;
     private bool _closingApproved;
 
@@ -146,6 +148,8 @@ public partial class MainWindow : Window
                 return await RenameStickerAsync(payload);
             case "backup":
                 return await BackupAsync();
+            case "toggleBackupPause":
+                return ToggleBackupPause();
             case "openBackupFolder":
                 Directory.CreateDirectory(SettingsRepository.DefaultBackupDirectory);
                 Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { SettingsRepository.DefaultBackupDirectory } });
@@ -767,15 +771,51 @@ public partial class MainWindow : Window
     {
         EnsureConnected();
         if (_busy) throw new InvalidOperationException("当前有操作正在进行。");
+        var pauseController = new BackupPauseController();
+        _backupPauseController = pauseController;
+        _lastBackupProgress = null;
         SetBusy(true);
         try
         {
-            var progress = new Progress<ServerSnapshotProgress>(snapshotProgress => SendProgress("backup", snapshotProgress));
+            var progress = new Progress<ServerSnapshotProgress>(snapshotProgress =>
+            {
+                _lastBackupProgress = snapshotProgress;
+                SendProgress("backup", snapshotProgress);
+            });
             var result = await new LocalServerBackupStore(SettingsRepository.DefaultBackupDirectory)
-                .CreateAsync(_settings.Connection, _remote, progress);
+                .CreateAsync(_settings.Connection, _remote, progress, pauseController);
             return new { directory = result.Directory, archivePath = result.ArchivePath, archiveBytes = result.ArchiveBytes, sha256 = result.Sha256 };
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            _backupPauseController = null;
+            _lastBackupProgress = null;
+            SetBusy(false);
+        }
+    }
+
+    private object ToggleBackupPause()
+    {
+        var controller = _backupPauseController
+            ?? throw new InvalidOperationException("当前没有正在运行的服务器备份。");
+        if (controller.IsPaused)
+        {
+            controller.Resume();
+            if (_lastBackupProgress is not null)
+                SendProgress("backup", _lastBackupProgress);
+            return new { paused = false };
+        }
+
+        controller.Pause();
+        var current = _lastBackupProgress ?? new ServerSnapshotProgress("estimating", 0, null, null, null, 1, 8);
+        SendProgress("backup", current with
+        {
+            Phase = "paused",
+            BytesPerSecond = 0,
+            RemainingSeconds = null,
+            Message = "备份已暂停；本地临时归档和当前 SSH 数据流均已保留。"
+        });
+        return new { paused = true };
     }
 
     private void EnsureConnected()

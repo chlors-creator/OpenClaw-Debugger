@@ -477,6 +477,7 @@ except Exception as e:
         ConnectionSettings settings,
         Stream destination,
         long estimatedTotalBytes,
+        BackupPauseController? pauseController = null,
         IProgress<ServerSnapshotProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -520,6 +521,8 @@ except Exception as e:
             var headerRead = 0;
             while (headerRead < gzipHeader.Length)
             {
+                if (pauseController is not null)
+                    await pauseController.WaitIfPausedAsync(timeout.Token);
                 var read = await ReadSnapshotOutputAsync(
                     process.StandardOutput.BaseStream, gzipHeader.AsMemory(headerRead), timeout.Token);
                 if (read == 0)
@@ -540,6 +543,8 @@ except Exception as e:
 
             while (true)
             {
+                if (pauseController is not null)
+                    await pauseController.WaitIfPausedAsync(timeout.Token);
                 var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, buffer, timeout.Token);
                 if (read == 0) break;
                 await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);

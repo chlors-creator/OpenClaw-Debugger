@@ -68,7 +68,12 @@
     const message = event.data || {};
     if (message.type === 'progress') {
       if (message.command === 'busy') setBusy(Boolean(message.data && message.data.busy));
-      if (message.command === 'backup') renderBackupProgress(message.data || {});
+      if (message.command === 'backup') {
+        const progress = message.data || {};
+        if (progress.phase === 'paused') backupPaused = true;
+        renderBackupProgress(progress);
+        syncBackupButton();
+      }
       return;
     }
     if (!message.id || !pending.has(String(message.id))) return;
@@ -85,13 +90,29 @@
       stickerPreviewLoading || uploadInProgress || renameInProgress || dirtyMemory || dirtyStickers || dirtyRaw;
   }
 
+  function syncBackupButton() {
+    const button = $('#backupButton');
+    const connected = $('.connection-chip').classList.contains('connected');
+    if (backupActive) {
+      button.disabled = false;
+      button.innerHTML = backupPaused ? '▶ <span>继续备份</span>' : 'Ⅱ <span>暂停备份</span>';
+      return;
+    }
+    button.innerHTML = '▣ <span>备份服务器</span>';
+    button.disabled = !connected;
+  }
+
   function setBusy(busy) {
     const busyNow = Boolean(busy || uploadInProgress || renameInProgress);
     const connected = $('.connection-chip').classList.contains('connected');
     document.body.classList.toggle('busy', busyNow);
     $('#connectButton').disabled = busyNow;
     $('#refreshButton').disabled = busyNow || !connected;
-    $('#backupButton').disabled = busyNow || !connected;
+    if (backupActive) {
+      $('#backupButton').disabled = false;
+    } else {
+      $('#backupButton').disabled = busyNow || !connected;
+    }
     $('#settingsConnectButton').disabled = busyNow;
     $('#saveSettingsButton').disabled = busyNow;
     $('#saveMemoryButton').disabled = busyNow || !memoryEditing || !dirtyMemory;
@@ -144,6 +165,8 @@
   }
 
   let lastBackupProgress = null;
+  let backupActive = false;
+  let backupPaused = false;
 
   function renderBackupProgress(data) {
     lastBackupProgress = data;
@@ -175,7 +198,19 @@
       track.setAttribute('aria-busy', 'true');
       track.removeAttribute('aria-valuenow');
       bar.style.width = '';
-      setStatus('正在扫描服务器并估算快照大小…');
+      return;
+    }
+
+    if (phase === 'paused') {
+      const percent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
+      $('#backupProgressTitle').textContent = '备份已暂停';
+      $('#backupProgressDetail').textContent = data.message || '本地临时归档和 SSH 数据流已保留';
+      $('#backupProgressPercent').textContent = percent + '%';
+      $('#backupSpeed').textContent = '已暂停';
+      $('#backupEta').textContent = '等待继续';
+      track.removeAttribute('aria-busy');
+      track.setAttribute('aria-valuenow', String(percent));
+      bar.style.width = percent + '%';
       return;
     }
 
@@ -189,7 +224,6 @@
       track.setAttribute('aria-busy', 'true');
       track.removeAttribute('aria-valuenow');
       bar.style.width = '';
-      setStatus($('#backupProgressDetail').textContent);
       return;
     }
 
@@ -202,7 +236,6 @@
       $('#backupEta').textContent = overEstimate ? '大小变化，重新估算中' : etaLabel(data.remainingSeconds);
       track.setAttribute('aria-valuenow', String(percent));
       bar.style.width = percent + '%';
-      setStatus('正在传输服务器快照：' + sizeLabel(bytes) + (total > 0 ? ' / 约 ' + sizeLabel(total) : '') + (speed > 0 ? ' · ' + sizeLabel(speed) + '/s' : ''));
       return;
     }
 
@@ -761,11 +794,11 @@
   }
   async function backupServer() {
     if (!$('.connection-chip').classList.contains('connected')) return;
-    $('#backupButton').disabled = true;
-    $('#backupButton').innerHTML = '◌ <span>正在备份…</span>';
+    backupActive = true;
+    backupPaused = false;
+    syncBackupButton();
     lastBackupProgress = null;
     renderBackupProgress({ phase: 'estimating', bytes: 0, totalBytes: null, attempt: 1, maxAttempts: 8 });
-    setStatus('正在扫描服务器并估算快照大小…');
     try {
       const result = await bridgeCall('backup', {});
       renderBackupProgress({ phase: 'completed', bytes: result.archiveBytes, totalBytes: result.archiveBytes });
@@ -778,10 +811,24 @@
       const last = lastBackupProgress || {};
       renderBackupProgress({ phase: 'failed', bytes: 0, totalBytes: last.totalBytes, message: error && error.message ? error.message : String(error) });
     } finally {
-      $('#backupButton').innerHTML = '▣ <span>备份服务器</span>';
-      $('#backupButton').disabled = !$('.connection-chip').classList.contains('connected');
+      backupActive = false;
+      backupPaused = false;
+      setBusy(false);
+      syncBackupButton();
     }
   }
+
+  async function toggleBackupPause() {
+    if (!backupActive) return backupServer();
+    try {
+      const result = await bridgeCall('toggleBackupPause', {});
+      backupPaused = Boolean(result && result.paused);
+      syncBackupButton();
+    } catch (error) {
+      reportError(error);
+    }
+  }
+
   function openRawEditor() {
     if (!stickerEditingEnabled) return;
     $('#rawCatalog').value = originalCatalog;
@@ -831,7 +878,7 @@
     $$('[data-go]').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.go)));
     $('#connectButton').addEventListener('click', connectServer);
     $('#refreshButton').addEventListener('click', connectServer);
-    $('#backupButton').addEventListener('click', backupServer);
+    $('#backupButton').addEventListener('click', toggleBackupPause);
     $('#settingsConnectButton').addEventListener('click', () => saveConnectionSettings(true));
     $('#saveSettingsButton').addEventListener('click', () => saveConnectionSettings(false));
     $('#openPrivateButton').addEventListener('click', () => bridgeCall('openPrivateFolder', {}).catch(reportError));

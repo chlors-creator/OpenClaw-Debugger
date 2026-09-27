@@ -27,6 +27,7 @@ public sealed class LocalServerBackupStore(string rootDirectory)
         ConnectionSettings settings,
         RemoteOpenClawClient remote,
         IProgress<ServerSnapshotProgress>? progress = null,
+        BackupPauseController? pauseController = null,
         CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(RootDirectory);
@@ -38,7 +39,11 @@ public sealed class LocalServerBackupStore(string rootDirectory)
         try
         {
             progress?.Report(new ServerSnapshotProgress("estimating", 0, null, null, null, 1, MaximumAttempts));
-            var estimatedTotalBytes = await EstimateWithRetryAsync(settings, remote, progress, cancellationToken);
+            if (pauseController is not null)
+                await pauseController.WaitIfPausedAsync(cancellationToken);
+            var estimatedTotalBytes = await EstimateWithRetryAsync(settings, remote, progress, pauseController, cancellationToken);
+            if (pauseController is not null)
+                await pauseController.WaitIfPausedAsync(cancellationToken);
             progress?.Report(new ServerSnapshotProgress("transferring", 0, estimatedTotalBytes, null, null, 1, MaximumAttempts));
 
             RemoteSnapshotTransferResult? transfer = null;
@@ -48,12 +53,15 @@ public sealed class LocalServerBackupStore(string rootDirectory)
                 transferAttempt = attempt;
                 try
                 {
+                    if (pauseController is not null)
+                        await pauseController.WaitIfPausedAsync(cancellationToken);
                     progress?.Report(new ServerSnapshotProgress("transferring", 0, estimatedTotalBytes, null, null, attempt, MaximumAttempts));
                     await using var output = new FileStream(
                         archivePath, FileMode.Create, FileAccess.Write, FileShare.None,
                         256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
                     transfer = await remote.WriteServerSnapshotAsync(
                         settings, output, estimatedTotalBytes,
+                        pauseController,
                         new AttemptProgress(progress, attempt, MaximumAttempts), cancellationToken);
                     await output.FlushAsync(cancellationToken);
                     output.Flush(flushToDisk: true);
@@ -115,15 +123,21 @@ public sealed class LocalServerBackupStore(string rootDirectory)
         ConnectionSettings settings,
         RemoteOpenClawClient remote,
         IProgress<ServerSnapshotProgress>? progress,
+        BackupPauseController? pauseController,
         CancellationToken cancellationToken)
     {
         for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
         {
             try
             {
+                if (pauseController is not null)
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
                 if (attempt > 1)
                     progress?.Report(new ServerSnapshotProgress("estimating", 0, null, null, null, attempt, MaximumAttempts));
-                return await remote.EstimateServerSnapshotSizeAsync(settings, cancellationToken);
+                var estimate = await remote.EstimateServerSnapshotSizeAsync(settings, cancellationToken);
+                if (pauseController is not null)
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
+                return estimate;
             }
             catch (SnapshotTransferInterruptedException) when (attempt < MaximumAttempts)
             {
@@ -132,6 +146,8 @@ public sealed class LocalServerBackupStore(string rootDirectory)
                     "retrying", 0, null, null, null, attempt + 1, MaximumAttempts,
                     $"估算期间 SSH 连接中断；{delay.TotalSeconds:0} 秒后重试。"));
                 await Task.Delay(delay, cancellationToken);
+                if (pauseController is not null)
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
             }
             catch (SnapshotTransferInterruptedException ex)
             {
