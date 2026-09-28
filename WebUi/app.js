@@ -13,6 +13,10 @@
   const stickerImageReads = new Map();
   const stickerCacheLimit = 96 * 1024 * 1024;
   let stickerCacheBytes = 0;
+  const stickerThumbnailCache = new Map();
+  const stickerThumbnailReads = new Map();
+  const stickerThumbnailCacheLimit = 16 * 1024 * 1024;
+  let stickerThumbnailCacheBytes = 0;
   let stickerThumbnailObserver = null;
   let currentTab = 'overview';
   let settings = { host: '106.14.173.90', username: 'admin', port: 22, workspacePath: '/home/admin/.openclaw/workspace', stickersPath: '/home/admin/.openclaw/workspace/stickers' };
@@ -214,6 +218,18 @@
       return;
     }
 
+    if (phase === 'preparing') {
+      $('#backupProgressTitle').textContent = attempt > 1 ? '重试生成服务器快照 · ' + attemptLabel : '正在服务器端生成快照';
+      $('#backupProgressDetail').textContent = data.message || '正在把服务器所有文件整理为可断点读取的归档';
+      $('#backupProgressPercent').textContent = '准备中';
+      $('#backupSpeed').textContent = '未开始';
+      $('#backupEta').textContent = '准备中';
+      track.setAttribute('aria-busy', 'true');
+      track.removeAttribute('aria-valuenow');
+      bar.style.width = '';
+      return;
+    }
+
     if (phase === 'paused') {
       const percent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
       $('#backupProgressTitle').textContent = '备份已暂停';
@@ -229,14 +245,15 @@
 
     if (phase === 'retrying') {
       $('#backupProgressTitle').textContent = '网络波动，正在自动重试 · ' + attemptLabel;
-      $('#backupProgressDetail').textContent = data.message || 'SSH 连接中断，等待恢复后重新传输';
-      $('#backupProgressPercent').textContent = '重连中';
-      $('#backupTransferred').textContent = '0 B';
+      $('#backupProgressDetail').textContent = data.message || 'SSH 连接中断，保留已传输内容后等待恢复';
+      const retainedPercent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
+      $('#backupProgressPercent').textContent = retainedPercent + '%';
+      $('#backupTransferred').textContent = sizeLabel(bytes);
       $('#backupSpeed').textContent = '连接恢复中';
       $('#backupEta').textContent = '等待重试';
       track.setAttribute('aria-busy', 'true');
-      track.removeAttribute('aria-valuenow');
-      bar.style.width = '';
+      track.setAttribute('aria-valuenow', String(retainedPercent));
+      bar.style.width = retainedPercent + '%';
       return;
     }
     if (phase === 'cancelling') {
@@ -545,13 +562,37 @@
 
   function clearStickerImageCache() {
     stickerImageCache.clear(); stickerImageReads.clear(); stickerCacheBytes = 0;
+    stickerThumbnailCache.clear(); stickerThumbnailReads.clear(); stickerThumbnailCacheBytes = 0;
   }
 
   function moveStickerImageCache(oldPath, newPath) {
     const cached = stickerImageCache.get(oldPath);
-    if (!cached) return;
-    stickerImageCache.delete(oldPath);
-    stickerImageCache.set(newPath, cached);
+    if (cached) {
+      stickerImageCache.delete(oldPath);
+      stickerImageCache.set(newPath, cached);
+    }
+    const thumbnail = stickerThumbnailCache.get(oldPath);
+    if (thumbnail) {
+      stickerThumbnailCache.delete(oldPath);
+      stickerThumbnailCache.set(newPath, thumbnail);
+    }
+  }
+
+  function rememberStickerThumbnail(path, preview) {
+    const size = Number(preview.size) || Math.ceil((preview.dataUrl || '').length * 0.75);
+    const previous = stickerThumbnailCache.get(path);
+    if (previous) stickerThumbnailCacheBytes -= previous.size;
+    if (size > stickerThumbnailCacheLimit) { stickerThumbnailCache.delete(path); return preview; }
+    stickerThumbnailCache.delete(path);
+    stickerThumbnailCache.set(path, { dataUrl: preview.dataUrl, size: size, originalSize: preview.originalSize });
+    stickerThumbnailCacheBytes += size;
+    while (stickerThumbnailCacheBytes > stickerThumbnailCacheLimit && stickerThumbnailCache.size) {
+      const oldestKey = stickerThumbnailCache.keys().next().value;
+      const oldest = stickerThumbnailCache.get(oldestKey);
+      stickerThumbnailCacheBytes -= oldest.size;
+      stickerThumbnailCache.delete(oldestKey);
+    }
+    return preview;
   }
 
   function loadStickerImage(path) {
@@ -567,9 +608,22 @@
     return read;
   }
 
+  function loadStickerThumbnailData(path) {
+    const cached = stickerThumbnailCache.get(path);
+    if (cached) {
+      stickerThumbnailCache.delete(path); stickerThumbnailCache.set(path, cached);
+      return Promise.resolve(cached);
+    }
+    if (stickerThumbnailReads.has(path)) return stickerThumbnailReads.get(path);
+    const read = bridgeCall('readStickerThumbnail', { path: path }).then(preview => rememberStickerThumbnail(path, preview))
+      .finally(() => stickerThumbnailReads.delete(path));
+    stickerThumbnailReads.set(path, read);
+    return read;
+  }
+
   async function loadStickerThumbnail(row, image) {
     try {
-      const preview = await loadStickerImage(row.imagePath);
+      const preview = await loadStickerThumbnailData(row.imagePath);
       if (!image.isConnected) return;
       image.src = preview.dataUrl;
       image.parentElement.classList.add('has-image');
@@ -837,7 +891,7 @@
     backupControlsClosing = false;
     syncBackupButton();
     lastBackupProgress = null;
-    renderBackupProgress({ phase: 'estimating', bytes: 0, totalBytes: null, attempt: 1, maxAttempts: 8 });
+    renderBackupProgress({ phase: 'preparing', bytes: 0, totalBytes: null, attempt: 1, maxAttempts: 8 });
     try {
       const result = await bridgeCall('backup', {});
       renderBackupProgress({ phase: 'completed', bytes: result.archiveBytes, totalBytes: result.archiveBytes });

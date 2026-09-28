@@ -11,6 +11,7 @@ namespace OpenClawDebugger;
 
 public sealed record RemoteStickerUploadResult(string RelativePath, long Size, string Sha256);
 public sealed record RemoteStickerRenameResult(string RelativePath, long Size, string Sha256);
+public sealed record RemoteStickerPairWriteResult(string CatalogSha256, long CatalogSize, string ManifestSha256, long ManifestSize);
 public sealed record ServerSnapshotProgress(
     string Phase,
     long Bytes,
@@ -24,17 +25,78 @@ public sealed record ServerSnapshotProgress(
 public sealed class SnapshotTransferInterruptedException(string message, Exception? innerException = null)
     : IOException(message, innerException);
 
-public sealed class RemoteOpenClawClient
+public sealed class RemoteOpenClawClient : IDisposable
 {
+    private readonly SemaphoreSlim _sessionGate = new(1, 1);
+    private Process? _sessionProcess;
+    private string? _sessionKey;
+
+    private const string UploadStreamProgram = """
+import base64, hashlib, json, os, stat, sys, tempfile
+from pathlib import PurePosixPath
+
+def fail(message, code="remote_error"):
+    print(json.dumps({"ok": False, "code": code, "error": message}, ensure_ascii=False), flush=True)
+    raise SystemExit(0)
+
+try:
+    request = json.loads(sys.stdin.buffer.readline().decode("utf-8"))
+    stickers = os.path.realpath(request["stickers"])
+    filename = request["filename"]
+    size = int(request["size"])
+    if not os.path.isdir(stickers) or not isinstance(filename, str) or not filename or filename in (".", "..") or "/" in filename or "\\" in filename or any(ord(c) < 32 for c in filename):
+        fail("上传文件名或表情包目录无效", "bad_upload")
+    if len(filename) > 180 or PurePosixPath(filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+        fail("仅允许 PNG、JPG、GIF、WEBP、BMP 图片，文件名最长 180 个字符", "bad_upload")
+    if size < 1 or size > 16 * 1024 * 1024:
+        fail("图片为空或超过 16 MiB 限制", "too_large")
+    target = os.path.join(stickers, filename)
+    if os.path.commonpath([stickers, os.path.realpath(os.path.dirname(target))]) != stickers or os.path.lexists(target):
+        fail("服务器已存在同名表情包，请先重命名本地文件", "conflict")
+    fd, temporary = tempfile.mkstemp(prefix=".openclaw-upload-", dir=stickers)
+    digest = hashlib.sha256()
+    remaining = size
+    try:
+        with os.fdopen(fd, "wb") as output:
+            while remaining:
+                chunk = sys.stdin.buffer.read(min(256 * 1024, remaining))
+                if not chunk:
+                    fail("上传连接在文件完成前中断", "incomplete_upload")
+                output.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o644)
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            fail("服务器已存在同名表情包，请先重命名本地文件", "conflict")
+        os.unlink(temporary)
+        temporary = None
+        try:
+            dfd = os.open(stickers, os.O_DIRECTORY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except Exception:
+            pass
+        print(json.dumps({"ok": True, "relativePath": filename, "size": size, "sha256": digest.hexdigest()}, separators=(",", ":")), flush=True)
+    finally:
+        if temporary and os.path.exists(temporary):
+            try: os.unlink(temporary)
+            except Exception: pass
+except SystemExit:
+    raise
+except Exception as error:
+    fail(type(error).__name__ + ": " + str(error))
+""";
+
     private const string PythonProgram = """
 import base64, hashlib, json, os, stat, sys, tempfile, time
 from pathlib import PurePosixPath
 
-P = json.loads(base64.b64decode("__PAYLOAD__").decode("utf-8"))
-ROOTS = {
-    "workspace": os.path.realpath(P["workspace"]),
-    "stickers": os.path.realpath(P["stickers"]),
-}
+P = {}
+ROOTS = {}
 ROOT_DOCS = {"MEMORY.md", "USER.md", "AGENTS.md", "SOUL.md", "DREAMS.md"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_TEXT = 4 * 1024 * 1024
@@ -195,6 +257,92 @@ def write_file():
             os.unlink(temporary)
     print(json.dumps({"ok": True, "sha256": sha(new_data), "size": len(new_data)}, separators=(",", ":")))
 
+def write_pair():
+    if P.get("root") != "stickers":
+        fail("只允许事务写入表情包标签文件", "bad_write")
+    catalog_path = safe_file("stickers", "catalog.json", write=True)
+    manifest_path = safe_file("stickers", "MANIFEST.md", write=True)
+    if not os.path.isfile(catalog_path) or not os.path.isfile(manifest_path):
+        fail("标签文件不存在；请先重新扫描服务器", "missing")
+    try:
+        catalog_data = base64.b64decode(P["catalogContent"], validate=True)
+        manifest_data = base64.b64decode(P["manifestContent"], validate=True)
+        catalog_data.decode("utf-8")
+        manifest_data.decode("utf-8")
+    except Exception:
+        fail("标签文件内容不是有效的 UTF-8 文本", "invalid_text")
+    if len(catalog_data) > MAX_TEXT or len(manifest_data) > MAX_TEXT:
+        fail("标签文件超过单文件编辑限制", "too_large")
+
+    lock_file = os.path.join(ROOTS["stickers"], ".openclaw-labels.lock")
+    lock_handle = None
+    temporary = []
+    replaced_catalog = False
+    replaced_manifest = False
+    old_catalog = None
+    old_manifest = None
+    try:
+        try:
+            import fcntl
+            lock_handle = open(lock_file, "a+b")
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            if lock_handle is not None:
+                lock_handle.close()
+                lock_handle = None
+        with open(catalog_path, "rb") as f: old_catalog = f.read(MAX_TEXT + 1)
+        with open(manifest_path, "rb") as f: old_manifest = f.read(MAX_TEXT + 1)
+        if len(old_catalog) > MAX_TEXT or len(old_manifest) > MAX_TEXT:
+            fail("标签文件超过单文件编辑限制", "too_large")
+        if sha(old_catalog) != P.get("catalogExpectedSha256", "") or sha(old_manifest) != P.get("manifestExpectedSha256", ""):
+            fail("服务器上的标签文件已被修改；请重新加载并比较差异后再保存", "conflict")
+        modes = [stat.S_IMODE(os.stat(catalog_path, follow_symlinks=False).st_mode), stat.S_IMODE(os.stat(manifest_path, follow_symlinks=False).st_mode)]
+        for data, mode in ((catalog_data, modes[0]), (manifest_data, modes[1])):
+            fd, temporary_path = tempfile.mkstemp(prefix=".openclaw-labels-", dir=ROOTS["stickers"])
+            temporary.append(temporary_path)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(temporary_path, mode)
+        os.replace(temporary[0], catalog_path)
+        replaced_catalog = True
+        os.replace(temporary[1], manifest_path)
+        replaced_manifest = True
+        try:
+            dfd = os.open(ROOTS["stickers"], os.O_DIRECTORY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except Exception:
+            pass
+    except SystemExit:
+        raise
+    except Exception as error:
+        if replaced_catalog and not replaced_manifest and old_catalog is not None:
+            try:
+                fd, restore_path = tempfile.mkstemp(prefix=".openclaw-labels-rollback-", dir=ROOTS["stickers"])
+                with os.fdopen(fd, "wb") as f:
+                    f.write(old_catalog)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(restore_path, catalog_path)
+            except Exception:
+                pass
+        fail("两个标签文件事务写入失败：" + str(error), "write_pair_failed")
+    finally:
+        for path in temporary:
+            if os.path.exists(path):
+                try: os.unlink(path)
+                except Exception: pass
+        if lock_handle is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            lock_handle.close()
+    print(json.dumps({"ok": True, "catalogSha256": sha(catalog_data), "catalogSize": len(catalog_data), "manifestSha256": sha(manifest_data), "manifestSize": len(manifest_data)}, separators=(",", ":")))
+
 def upload_image():
     root_name = P.get("root")
     filename = P.get("filename")
@@ -278,27 +426,41 @@ def rename_image():
     except Exception:
         pass
     print(json.dumps({"ok": True, "relativePath": new_name, "size": len(source_data), "sha256": source_hash}, separators=(",", ":")))
-try:
-    for root in ROOTS.values():
-        if not os.path.isabs(root) or not os.path.isdir(root):
-            fail("配置的远程目录不存在或不是目录", "bad_root")
-    action = P.get("action")
-    if action == "inventory":
-        inventory()
-    elif action == "read":
-        read_file()
-    elif action == "write":
-        write_file()
-    elif action == "upload":
-        upload_image()
-    elif action == "rename":
-        rename_image()
-    else:
-        fail("不支持的操作")
-except SystemExit:
-    raise
-except Exception as e:
-    fail(type(e).__name__ + ": " + str(e))
+def handle(encoded):
+    global P, ROOTS
+    try:
+        P = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        ROOTS = {
+            "workspace": os.path.realpath(P["workspace"]),
+            "stickers": os.path.realpath(P["stickers"]),
+        }
+        for root in ROOTS.values():
+            if not os.path.isabs(root) or not os.path.isdir(root):
+                fail("配置的远程目录不存在或不是目录", "bad_root")
+        action = P.get("action")
+        if action == "inventory":
+            inventory()
+        elif action == "read":
+            read_file()
+        elif action == "write":
+            write_file()
+        elif action == "write_pair":
+            write_pair()
+        elif action == "upload":
+            upload_image()
+        elif action == "rename":
+            rename_image()
+        else:
+            fail("不支持的操作")
+    except SystemExit:
+        return
+    except Exception as e:
+        fail(type(e).__name__ + ": " + str(e))
+
+for line in sys.stdin:
+    line = line.strip()
+    if line:
+        handle(line)
 """;
 
     public async Task<IReadOnlyList<RemoteFile>> ConnectAndListAsync(
@@ -374,6 +536,30 @@ except Exception as e:
         var response = await InvokeAsync(settings, request, cancellationToken);
         return response["sha256"]?.GetValue<string>() ?? "";
     }
+    public async Task<RemoteStickerPairWriteResult> WriteStickerPairAsync(
+        ConnectionSettings settings,
+        string catalogText,
+        string expectedCatalogSha256,
+        string manifestText,
+        string expectedManifestSha256,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new JsonObject
+        {
+            ["action"] = "write_pair",
+            ["root"] = "stickers",
+            ["catalogExpectedSha256"] = expectedCatalogSha256,
+            ["manifestExpectedSha256"] = expectedManifestSha256,
+            ["catalogContent"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(catalogText)),
+            ["manifestContent"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(manifestText))
+        };
+        var response = await InvokeAsync(settings, request, cancellationToken);
+        return new RemoteStickerPairWriteResult(
+            response["catalogSha256"]?.GetValue<string>() ?? "",
+            response["catalogSize"]?.GetValue<long>() ?? Encoding.UTF8.GetByteCount(catalogText),
+            response["manifestSha256"]?.GetValue<string>() ?? "",
+            response["manifestSize"]?.GetValue<long>() ?? Encoding.UTF8.GetByteCount(manifestText));
+    }
     public async Task<RemoteStickerUploadResult> UploadStickerAsync(
         ConnectionSettings settings, string fileName, byte[] bytes, CancellationToken cancellationToken = default)
     {
@@ -389,6 +575,92 @@ except Exception as e:
             response["relativePath"]?.GetValue<string>() ?? fileName,
             response["size"]?.GetValue<long>() ?? bytes.LongLength,
             response["sha256"]?.GetValue<string>() ?? "");
+    }
+
+    public async Task<RemoteStickerUploadResult> UploadStickerAsync(
+        ConnectionSettings settings,
+        string fileName,
+        Stream source,
+        long size,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSettings(settings);
+        if (source is null) throw new ArgumentNullException(nameof(source));
+        if (size is < 1 or > 16 * 1024 * 1024) throw new InvalidDataException("图片为空或超过 16 MiB 限制。");
+        var start = new ProcessStartInfo
+        {
+            FileName = "ssh.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false)
+        };
+        AddSnapshotSshArguments(start, settings);
+        var program64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(UploadStreamProgram));
+        start.ArgumentList.Add("python3 -u -c \"import base64;exec(base64.b64decode('" + program64 + "'))\"");
+        using var process = new Process { StartInfo = start };
+        try
+        {
+            if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(30));
+        var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            var header = JsonSerializer.Serialize(new { stickers = settings.StickersPath, filename = fileName, size }) + "\n";
+            var headerBytes = Encoding.UTF8.GetBytes(header);
+            await process.StandardInput.BaseStream.WriteAsync(headerBytes, timeout.Token);
+            await process.StandardInput.BaseStream.FlushAsync(timeout.Token);
+            if (source.CanSeek) source.Position = 0;
+            await source.CopyToAsync(process.StandardInput.BaseStream, 256 * 1024, timeout.Token);
+            await process.StandardInput.BaseStream.FlushAsync(timeout.Token);
+            process.StandardInput.Close();
+            var outputLine = await process.StandardOutput.ReadLineAsync(timeout.Token);
+            await process.WaitForExitAsync(timeout.Token);
+            var error = await errorTask;
+            if (process.ExitCode != 0)
+                throw CreateSnapshotFailure(error, process.ExitCode);
+            if (string.IsNullOrWhiteSpace(outputLine)) throw new InvalidOperationException("服务器没有返回上传结果。");
+            var response = JsonNode.Parse(outputLine) as JsonObject
+                ?? throw new InvalidOperationException("服务器返回的上传结果无法识别。");
+            if (response["ok"]?.GetValue<bool>() != true)
+            {
+                var code = response["code"]?.GetValue<string>() ?? "";
+                var message = response["error"]?.GetValue<string>() ?? "远程上传失败。";
+                if (code == "conflict") throw new RemoteConflictException(message);
+                throw new InvalidOperationException(message);
+            }
+            return new RemoteStickerUploadResult(
+                response["relativePath"]?.GetValue<string>() ?? fileName,
+                response["size"]?.GetValue<long>() ?? size,
+                response["sha256"]?.GetValue<string>() ?? "");
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("图片上传超过 30 分钟，操作已中止。");
+        }
+        catch (IOException ex)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new SnapshotTransferInterruptedException("SSH 连接在上传图片时中断。", ex);
+        }
+        finally
+        {
+            if (!process.HasExited)
+                try { process.Kill(entireProcessTree: true); } catch { }
+        }
     }
     public async Task<RemoteStickerRenameResult> RenameStickerAsync(
         ConnectionSettings settings, string oldFileName, string newFileName, string expectedSha256,
@@ -408,6 +680,225 @@ except Exception as e:
             response["size"]?.GetValue<long>() ?? 0,
             response["sha256"]?.GetValue<string>() ?? expectedSha256);
     }
+    public async Task CreateServerSnapshotAsync(
+        ConnectionSettings settings,
+        string remotePath,
+        BackupPauseController? pauseController = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSettings(settings);
+        ValidateRemoteSnapshotPath(remotePath);
+        if (pauseController is not null) await pauseController.WaitIfPausedAsync(cancellationToken);
+        var start = CreateSnapshotStart(settings, redirectOutput: true);
+        start.ArgumentList.Add("sudo -n tar --create --gzip --file='" + remotePath + "' --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .");
+        using var process = StartProcess(start);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromHours(12));
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+            _ = await stdoutTask;
+            var error = await stderrTask;
+            if (process.ExitCode != 0) throw CreateSnapshotFailure(error, process.ExitCode);
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("服务器生成快照超过 12 小时，操作已中止。");
+        }
+        finally
+        {
+            if (!process.HasExited)
+                try { process.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
+    public async Task<long> GetServerSnapshotSizeAsync(
+        ConnectionSettings settings,
+        string remotePath,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSettings(settings);
+        ValidateRemoteSnapshotPath(remotePath);
+        var start = CreateSnapshotStart(settings, redirectOutput: true);
+        start.ArgumentList.Add("sudo -n stat -c %s -- '" + remotePath + "'");
+        using var process = StartProcess(start);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(3));
+        var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+            var output = await outputTask;
+            var error = await stderrTask;
+            if (process.ExitCode != 0) throw CreateSnapshotFailure(error, process.ExitCode);
+            var text = output.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.Trim();
+            if (!long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var bytes) || bytes <= 0)
+                throw new InvalidDataException("服务器未返回有效的快照大小。");
+            return bytes;
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("读取服务器快照大小超时。");
+        }
+        finally
+        {
+            if (!process.HasExited)
+                try { process.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
+    public async Task<RemoteSnapshotTransferResult> ResumeServerSnapshotAsync(
+        ConnectionSettings settings,
+        string remotePath,
+        Stream destination,
+        long offset,
+        long totalBytes,
+        BackupPauseController? pauseController = null,
+        IProgress<ServerSnapshotProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSettings(settings);
+        ValidateRemoteSnapshotPath(remotePath);
+        if (offset < 0 || totalBytes <= 0 || offset > totalBytes) throw new ArgumentOutOfRangeException(nameof(offset));
+        var start = CreateSnapshotStart(settings, redirectOutput: true);
+        start.ArgumentList.Add("sudo -n tail -c +" + (offset + 1).ToString(CultureInfo.InvariantCulture) + " -- '" + remotePath + "'");
+        using var process = StartProcess(start);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromHours(12));
+        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        var buffer = new byte[256 * 1024];
+        var timer = Stopwatch.StartNew();
+        var transferred = offset;
+        var chunkBytes = 0L;
+        var lastReportAt = TimeSpan.Zero;
+        try
+        {
+            if (offset == 0)
+            {
+                var header = new byte[2];
+                var readHeader = 0;
+                while (readHeader < header.Length)
+                {
+                    if (pauseController is not null) await pauseController.WaitIfPausedAsync(timeout.Token);
+                    var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, header.AsMemory(readHeader), timeout.Token);
+                    if (read == 0) throw new SnapshotTransferInterruptedException("服务器快照在读取 gzip 头时提前结束。");
+                    readHeader += read;
+                }
+                if (header[0] != 0x1f || header[1] != 0x8b)
+                    throw new InvalidDataException("远程快照不是 gzip 数据。");
+                await destination.WriteAsync(header, timeout.Token);
+                transferred += header.Length;
+                chunkBytes += header.Length;
+            }
+            while (true)
+            {
+                if (pauseController is not null) await pauseController.WaitIfPausedAsync(timeout.Token);
+                var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, buffer, timeout.Token);
+                if (read == 0) break;
+                if (transferred + read > totalBytes) throw new InvalidDataException("服务器快照大小在传输期间发生变化。");
+                await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+                transferred += read;
+                chunkBytes += read;
+                var elapsed = timer.Elapsed;
+                if (chunkBytes >= 1024 * 1024 || elapsed - lastReportAt >= TimeSpan.FromMilliseconds(500))
+                {
+                    var speed = elapsed.TotalSeconds > 0 ? chunkBytes / elapsed.TotalSeconds : 0;
+                    var remaining = totalBytes > transferred && speed > 0
+                        ? (long?)Math.Ceiling((totalBytes - transferred) / speed) : null;
+                    progress?.Report(new ServerSnapshotProgress("transferring", transferred, totalBytes, speed, remaining));
+                    chunkBytes = 0;
+                    lastReportAt = elapsed;
+                }
+            }
+            await process.WaitForExitAsync(timeout.Token);
+            var error = await stderrTask;
+            if (process.ExitCode != 0) throw CreateSnapshotFailure(error, process.ExitCode);
+            if (transferred != totalBytes)
+                throw new SnapshotTransferInterruptedException($"服务器快照传输提前结束，已收到 {transferred} / {totalBytes} 字节。");
+            var finalSpeed = timer.Elapsed.TotalSeconds > 0 ? Math.Max(0, transferred - offset) / timer.Elapsed.TotalSeconds : 0;
+            progress?.Report(new ServerSnapshotProgress("transferring", transferred, totalBytes, finalSpeed, 0));
+            return new RemoteSnapshotTransferResult(transferred, "");
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("服务器快照传输超过 12 小时，操作已中止。");
+        }
+        finally
+        {
+            if (!process.HasExited)
+                try { process.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
+    public async Task RemoveServerSnapshotAsync(
+        ConnectionSettings settings,
+        string remotePath,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            ValidateSettings(settings);
+            ValidateRemoteSnapshotPath(remotePath);
+            var start = CreateSnapshotStart(settings, redirectOutput: true);
+            start.ArgumentList.Add("sudo -n rm -f -- '" + remotePath + "'");
+            using var process = StartProcess(start);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromMinutes(3));
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+            var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
+            await process.WaitForExitAsync(timeout.Token);
+            _ = await stdoutTask;
+            _ = await stderrTask;
+        }
+        catch { }
+    }
+
+    private static void ValidateRemoteSnapshotPath(string remotePath)
+    {
+        if (!Regex.IsMatch(remotePath, @"^/tmp/\.openclaw-debugger-[0-9a-f]{32}\.tar\.gz$"))
+            throw new InvalidDataException("服务器快照临时路径无效。");
+    }
+
+    private static ProcessStartInfo CreateSnapshotStart(ConnectionSettings settings, bool redirectOutput)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = "ssh.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = redirectOutput,
+            RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false)
+        };
+        AddSnapshotSshArguments(start, settings);
+        return start;
+    }
+
+    private static Process StartProcess(ProcessStartInfo start)
+    {
+        var process = new Process { StartInfo = start };
+        try
+        {
+            if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
+            return process;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            process.Dispose();
+            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
+        }
+    }
+
     public async Task<long> EstimateServerSnapshotSizeAsync(
         ConnectionSettings settings,
         CancellationToken cancellationToken = default)
@@ -657,14 +1148,54 @@ except Exception as e:
         }
     }
 
-    private static async Task<JsonObject> InvokeAsync(
+    private async Task<JsonObject> InvokeAsync(
         ConnectionSettings settings, JsonObject request, CancellationToken cancellationToken)
     {
         ValidateSettings(settings);
         request["workspace"] = settings.WorkspacePath;
         request["stickers"] = settings.StickersPath;
         var payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(request.ToJsonString()));
-        var program = PythonProgram.Replace("__PAYLOAD__", payload, StringComparison.Ordinal);
+        await _sessionGate.WaitAsync(cancellationToken);
+        try
+        {
+            var process = EnsureSession(settings);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromMinutes(3));
+            await process.StandardInput.WriteAsync(payload.AsMemory(), timeout.Token);
+            await process.StandardInput.WriteAsync("\n".AsMemory(), timeout.Token);
+            await process.StandardInput.FlushAsync(timeout.Token);
+            var line = await process.StandardOutput.ReadLineAsync(timeout.Token);
+            if (line is null) throw new IOException("SSH 复用连接已关闭。");
+            return ParseRemoteResponse(line);
+        }
+        catch (OperationCanceledException)
+        {
+            ResetSession();
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("SSH 操作超时。请检查网络、SSH 密钥代理和服务器状态。");
+        }
+        catch (IOException ex)
+        {
+            ResetSession();
+            throw new SnapshotTransferInterruptedException("SSH 复用连接中断。", ex);
+        }
+        catch
+        {
+            if (_sessionProcess is null || _sessionProcess.HasExited) ResetSession();
+            throw;
+        }
+        finally
+        {
+            _sessionGate.Release();
+        }
+    }
+
+    private Process EnsureSession(ConnectionSettings settings)
+    {
+        var key = settings.Target + ":" + settings.Port.ToString(CultureInfo.InvariantCulture) + "|" + settings.WorkspacePath + "|" + settings.StickersPath;
+        if (_sessionProcess is not null && !_sessionProcess.HasExited && string.Equals(_sessionKey, key, StringComparison.Ordinal))
+            return _sessionProcess;
+        ResetSession();
         var start = new ProcessStartInfo
         {
             FileName = "ssh.exe",
@@ -677,68 +1208,45 @@ except Exception as e:
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false)
         };
-        start.ArgumentList.Add("-T");
-        start.ArgumentList.Add("-o");
-        start.ArgumentList.Add("BatchMode=yes");
-        start.ArgumentList.Add("-o");
-        start.ArgumentList.Add("StrictHostKeyChecking=yes");
-        start.ArgumentList.Add("-o");
-        start.ArgumentList.Add("ConnectTimeout=12");
-        start.ArgumentList.Add("-o");
-        start.ArgumentList.Add("LogLevel=ERROR");
-        start.ArgumentList.Add("-p");
-        start.ArgumentList.Add(settings.Port.ToString(CultureInfo.InvariantCulture));
-        start.ArgumentList.Add(settings.Target);
-        start.ArgumentList.Add("python3");
-        start.ArgumentList.Add("-");
-
-        using var process = new Process { StartInfo = start };
+        AddSnapshotSshArguments(start, settings);
+        var program64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(PythonProgram));
+        start.ArgumentList.Add("python3 -u -c \"import base64;exec(base64.b64decode('" + program64 + "'))\"");
+        var process = new Process { StartInfo = start };
         try
         {
-            if (!process.Start())
-                throw new InvalidOperationException("无法启动 Windows OpenSSH。");
+            if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            process.Dispose();
             throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
         }
+        _ = process.StandardError.ReadToEndAsync();
+        _sessionProcess = process;
+        _sessionKey = key;
+        return process;
+    }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMinutes(3));
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-        try
-        {
-            await process.StandardInput.WriteAsync(program.AsMemory(), timeout.Token);
-            await process.StandardInput.FlushAsync(timeout.Token);
-            process.StandardInput.Close();
-            await process.WaitForExitAsync(timeout.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new TimeoutException("SSH 操作超时。请检查网络、SSH 密钥代理和服务器状态。");
-        }
+    private void ResetSession()
+    {
+        var process = _sessionProcess;
+        _sessionProcess = null;
+        _sessionKey = null;
+        if (process is null) return;
+        try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+        process.Dispose();
+    }
 
-        var output = await stdoutTask;
-        var error = await stderrTask;
-        if (process.ExitCode != 0)
-        {
-            var detail = string.Join(Environment.NewLine, error.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Take(5));
-            if (detail.Contains("Permission denied", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("当前 Windows OpenSSH 身份未通过服务器认证。请先确认此 Windows 用户执行 ssh admin@106.14.173.90 能直接登录；应用不会要求输入或保存密钥。");
-            if (detail.Contains("REMOTE HOST IDENTIFICATION HAS CHANGED", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("服务器 SSH 主机指纹与 known_hosts 不符。请先核实新指纹，再更新本机 SSH 配置。");
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
-                ? $"SSH 操作失败，退出码 {process.ExitCode}。"
-                : $"SSH 操作失败：{detail}");
-        }
+    public void Dispose()
+    {
+        ResetSession();
+        _sessionGate.Dispose();
+    }
 
-        var line = output.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.Trim();
-        if (line is null) throw new InvalidOperationException("服务器没有返回有效结果。");
+    private static JsonObject ParseRemoteResponse(string line)
+    {
         JsonObject? response;
-        try { response = JsonNode.Parse(line) as JsonObject; }
+        try { response = JsonNode.Parse(line.Trim()) as JsonObject; }
         catch (JsonException ex) { throw new InvalidOperationException("服务器返回的数据无法识别。", ex); }
         if (response is null) throw new InvalidOperationException("服务器返回的数据为空。");
         if (response["ok"]?.GetValue<bool>() != true)
