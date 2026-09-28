@@ -1,16 +1,12 @@
 using Microsoft.Web.WebView2.Core;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Security;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace OpenClawDebugger;
 
@@ -21,26 +17,17 @@ public partial class MainWindow : Window
         PropertyNameCaseInsensitive = true
     };
 
+    private readonly BridgeResponseWriter _bridgeResponses = new();
+    private BridgeDispatcher? _bridgeDispatcher;
     private readonly RemoteOpenClawClient _remote = new();
     private readonly Dictionary<string, RemoteFileContent> _loadedMemory = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, StickerUploadSession> _stickerUploads = new(StringComparer.Ordinal);
-    private const int StickerUploadLimit = 16 * 1024 * 1024;
-    private const int StickerUploadChunkLimit = 192 * 1024;
-    private const int StickerThumbnailEdge = 256;
-    private const long StickerThumbnailPersistentCacheLimit = 128L * 1024 * 1024;
     private UserSettings _settings = new();
     private LocalSnapshotStore? _snapshots;
+    private StickerService? _stickers;
+    private BackupCoordinator? _backup;
     private IReadOnlyList<RemoteFile> _files = [];
-    private RemoteFile? _catalogFile;
-    private RemoteFile? _manifestFile;
-    private RemoteFileContent? _catalogContent;
-    private RemoteFileContent? _manifestContent;
-    private ParsedStickerCatalog? _catalog;
     private bool _serverConnected;
     private bool _busy;
-    private BackupPauseController? _backupPauseController;
-    private CancellationTokenSource? _backupCancellation;
-    private ServerSnapshotProgress? _lastBackupProgress;
     private bool _hasDrafts;
     private bool _closingApproved;
 
@@ -54,6 +41,23 @@ public partial class MainWindow : Window
             _settings.PrivateDirectory = SettingsRepository.DefaultPrivateDirectory;
             if (_settings.ThemeName is not ("Atri" or "Luoxi" or "Light")) _settings.ThemeName = "Atri";
             _snapshots = new LocalSnapshotStore(_settings.PrivateDirectory);
+            _stickers = new StickerService(
+                _remote,
+                new StickerThumbnailCache(_settings.PrivateDirectory),
+                new StickerUploadService(),
+                () => _settings.Connection,
+                () => _snapshots,
+                () => _settings.PrivateDirectory,
+                () => _serverConnected,
+                () => _busy,
+                value => _serverConnected = value,
+                SetBusy);
+            _backup = new BackupCoordinator(
+                _remote,
+                SettingsRepository.DefaultBackupDirectory,
+                () => _busy,
+                SetBusy,
+                (command, data) => _bridgeResponses.SendProgress(command, data));
 
             await MainWebView.EnsureCoreWebView2Async();
             var core = MainWebView.CoreWebView2;
@@ -63,7 +67,9 @@ public partial class MainWindow : Window
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsZoomControlEnabled = false;
             core.Settings.IsWebMessageEnabled = true;
-            core.WebMessageReceived += WebMessageReceived;
+            _bridgeResponses.Attach(core);
+            _bridgeDispatcher = new BridgeDispatcher(DispatchAsync, _bridgeResponses);
+            core.WebMessageReceived += (_, args) => _ = _bridgeDispatcher.HandleAsync(args);
             core.NavigationStarting += (_, args) =>
             {
                 if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri) ||
@@ -84,26 +90,6 @@ public partial class MainWindow : Window
                 "OpenClaw Debugger 启动失败", MessageBoxButton.OK, MessageBoxImage.Error);
             _closingApproved = true;
             Close();
-        }
-    }
-
-    private async void WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
-    {
-        if (!Uri.TryCreate(e.Source, UriKind.Absolute, out var source) || source.Scheme != "https" ||
-            !source.Host.Equals("openclaw.local", StringComparison.OrdinalIgnoreCase)) return;
-
-        string? id = null;
-        try
-        {
-            var request = JsonSerializer.Deserialize<BridgeRequest>(e.WebMessageAsJson, JsonOptions)
-                ?? throw new InvalidDataException("无效的界面请求。");
-            id = request.Id;
-            var result = await DispatchAsync(request.Command, request.Payload);
-            Respond(id, true, result, null);
-        }
-        catch (Exception ex)
-        {
-            if (id is not null) Respond(id, false, null, ex.Message);
         }
     }
 
@@ -136,31 +122,34 @@ public partial class MainWindow : Window
             case "saveMemory":
                 return await SaveMemoryAsync(payload);
             case "readSticker":
-                return await ReadStickerAsync(payload);
+                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).ReadAsync(payload);
             case "readStickerThumbnail":
-                return await ReadStickerThumbnailAsync(payload);
+                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).ReadThumbnailAsync(payload);
             case "previewStickerRows":
-                return PreviewStickerRows(payload);
+                return (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).PreviewRows(payload);
             case "saveStickerRows":
-                return await SaveStickerRowsAsync(payload);
+                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).SaveRowsAsync(payload);
             case "saveStickerRaw":
-                return await SaveStickerRawAsync(payload);
+                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).SaveRawAsync(payload);
             case "beginStickerUpload":
-                return BeginStickerUpload(payload);
+                return (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).BeginUpload(payload);
             case "appendStickerUpload":
-                return AppendStickerUpload(payload);
+                return (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).AppendUpload(payload);
             case "commitStickerUpload":
-                return await CommitStickerUploadAsync(payload);
+                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).CommitUploadAsync(payload);
             case "cancelStickerUpload":
-                return CancelStickerUpload(payload);
+                (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).CancelUpload(payload);
+                return new { cancelled = true };
             case "renameSticker":
-                return await RenameStickerAsync(payload);
+                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).RenameAsync(payload);
             case "backup":
-                return await BackupAsync();
+                var backup = _backup ?? throw new InvalidOperationException("备份服务未初始化。");
+                var backupResult = await backup.StartAsync(_settings.Connection);
+                return new { directory = backupResult.Directory, archivePath = backupResult.ArchivePath, archiveBytes = backupResult.ArchiveBytes, sha256 = backupResult.Sha256 };
             case "toggleBackupPause":
-                return ToggleBackupPause();
+                return (_backup ?? throw new InvalidOperationException("备份服务未初始化。")).TogglePause();
             case "cancelBackup":
-                return CancelBackup();
+                return (_backup ?? throw new InvalidOperationException("备份服务未初始化。")).Cancel();
             case "openBackupFolder":
                 Directory.CreateDirectory(SettingsRepository.DefaultBackupDirectory);
                 Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { SettingsRepository.DefaultBackupDirectory } });
@@ -215,42 +204,8 @@ public partial class MainWindow : Window
             _files = await _remote.ConnectAndListAsync(_settings.Connection);
             _serverConnected = true;
             _loadedMemory.Clear();
-            _catalogFile = _files.FirstOrDefault(x => x.Root == "stickers" && x.RelativePath == "catalog.json");
-            _manifestFile = _files.FirstOrDefault(x => x.Root == "stickers" && x.RelativePath == "MANIFEST.md");
-            _catalog = null;
-            _catalogContent = null;
-            _manifestContent = null;
-            string stickerStatus;
-            var stickerRows = new List<StickerRow>();
-            if (_catalogFile is null || _manifestFile is null)
-            {
-                stickerRows = _files.Where(x => x.Root == "stickers" && x.IsImage)
-                    .Select(x => new StickerRow { Id = Path.GetFileNameWithoutExtension(x.RelativePath), ImagePath = x.RelativePath }).ToList();
-                stickerStatus = "找不到 catalog.json 或 MANIFEST.md；标签编辑已关闭以避免不完整写入。";
-            }
-            else
-            {
-                try
-                {
-                    var catTask = _remote.ReadAsync(_settings.Connection, _catalogFile);
-                    var manifestTask = _remote.ReadAsync(_settings.Connection, _manifestFile);
-                    await Task.WhenAll(catTask, manifestTask);
-                    _catalogContent = catTask.Result;
-                    _manifestContent = manifestTask.Result;
-                    var images = _files.Where(x => x.Root == "stickers" && x.IsImage).ToList();
-                    if (StickerCatalogEditor.TryParse(_catalogContent.Text ?? "", images, out _catalog, out var error))
-                    {
-                        stickerRows = _catalog!.Rows.ToList();
-                        stickerStatus = "已读取 " + stickerRows.Count + " 条目录记录。标签保存会同时更新目录和说明文件，并在写入前生成加密快照。";
-                    }
-                    else
-                    {
-                        stickerRows = images.Select(x => new StickerRow { Id = Path.GetFileNameWithoutExtension(x.RelativePath), ImagePath = x.RelativePath }).ToList();
-                        stickerStatus = error;
-                    }
-                }
-                catch (Exception ex) { stickerStatus = "读取目录失败：" + ex.Message; }
-            }
+            var stickerService = _stickers ?? throw new InvalidOperationException("表情包服务未初始化。");
+            var stickerLoad = await stickerService.LoadAsync(_files);
             var memories = _files.Where(x => x.Root == "workspace" && !x.IsImage && x.Editable)
                 .OrderBy(x => x.RelativePath.StartsWith("memory/", StringComparison.Ordinal) ? 1 : 0)
                 .ThenBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase).ToList();
@@ -261,12 +216,12 @@ public partial class MainWindow : Window
                 connectionStatus = "已连接 · " + memories.Count + " 个文档 · " + imagesCount + " 张图片",
                 memoryFiles = memories,
                 memoryCount = memories.Count,
-                stickerFiles = GetStickerUiRows(),
-                stickerCount = imagesCount,
-                stickerEditingEnabled = _catalog is not null && _catalogFile is not null && _manifestFile is not null,
-                catalogText = _catalogContent?.Text,
-                manifestText = _manifestContent?.Text,
-                stickerStatus,
+                stickerFiles = stickerLoad.StickerFiles,
+                stickerCount = stickerLoad.StickerCount,
+                stickerEditingEnabled = stickerLoad.StickerEditingEnabled,
+                catalogText = stickerLoad.CatalogText,
+                manifestText = stickerLoad.ManifestText,
+                stickerStatus = stickerLoad.StickerStatus,
                 workspacePath = _settings.Connection.WorkspacePath,
                 stickersPath = _settings.Connection.StickersPath
             };
@@ -317,725 +272,6 @@ public partial class MainWindow : Window
         finally { SetBusy(false); }
     }
 
-    private async Task<object> ReadStickerAsync(JsonElement payload)
-    {
-        EnsureConnected();
-        var path = payload.GetProperty("path").GetString() ?? "";
-        var file = _files.FirstOrDefault(x => x.Root == "stickers" && x.IsImage && x.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException("图片不在本次扫描的表情包目录内。");
-        var content = await _remote.ReadAsync(_settings.Connection, file);
-        if (content.Binary is null) throw new InvalidDataException("服务器返回的图片数据为空。");
-        var mime = Path.GetExtension(file.RelativePath).ToLowerInvariant() switch
-        {
-            ".gif" => "image/gif", ".png" => "image/png", ".webp" => "image/webp", ".jpg" or ".jpeg" => "image/jpeg", ".bmp" => "image/bmp", _ => "application/octet-stream"
-        };
-        return new { path = path, dataUrl = "data:" + mime + ";base64," + Convert.ToBase64String(content.Binary), size = content.Size };
-    }
-
-    private async Task<object> ReadStickerThumbnailAsync(JsonElement payload)
-    {
-        EnsureConnected();
-        var path = payload.GetProperty("path").GetString() ?? "";
-        var file = _files.FirstOrDefault(x => x.Root == "stickers" && x.IsImage && x.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException("图片不在本次扫描的表情包目录内。");
-
-        var cachePath = GetStickerThumbnailCachePath(file);
-        var cached = await ReadStickerThumbnailCacheAsync(cachePath);
-        if (cached is not null)
-        {
-            return new
-            {
-                path,
-                dataUrl = cached.DataUrl,
-                size = cached.Size,
-                originalSize = cached.OriginalSize,
-                thumbnailEdge = StickerThumbnailEdge,
-                cacheHit = true
-            };
-        }
-
-        var content = await _remote.ReadAsync(_settings.Connection, file);
-        var original = content.Binary ?? throw new InvalidDataException("服务器返回的图片数据为空。");
-        var thumbnail = await Task.Run(() => CreateStickerThumbnail(original, path));
-        var cacheEntry = new CachedStickerThumbnail(thumbnail.DataUrl, thumbnail.Size, content.Size, StickerThumbnailEdge);
-        await WriteStickerThumbnailCacheAsync(cachePath, cacheEntry);
-        return new
-        {
-            path,
-            dataUrl = thumbnail.DataUrl,
-            size = thumbnail.Size,
-            originalSize = content.Size,
-            thumbnailEdge = StickerThumbnailEdge,
-            cacheHit = false
-        };
-    }
-
-    private string GetStickerThumbnailCachePath(RemoteFile file)
-    {
-        var fingerprint = string.Join("\0",
-            file.Key,
-            file.Size.ToString(CultureInfo.InvariantCulture),
-            (file.ModifiedUtc?.UtcDateTime.Ticks ?? 0).ToString(CultureInfo.InvariantCulture),
-            file.Sha256);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint))).ToLowerInvariant();
-        return Path.Combine(_settings.PrivateDirectory, "ThumbnailCache", "thumb-" + hash + ".json");
-    }
-
-    private static async Task<CachedStickerThumbnail?> ReadStickerThumbnailCacheAsync(string cachePath)
-    {
-        try
-        {
-            if (!File.Exists(cachePath)) return null;
-            CachedStickerThumbnail? cached;
-            await using (var stream = new FileStream(cachePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-            {
-                cached = await JsonSerializer.DeserializeAsync<CachedStickerThumbnail>(stream, JsonOptions);
-            }
-            if (cached is null || cached.ThumbnailEdge != StickerThumbnailEdge || cached.Size <= 0 ||
-                cached.OriginalSize < 0 || string.IsNullOrWhiteSpace(cached.DataUrl))
-            {
-                TryDeleteStickerThumbnailCacheFile(cachePath);
-                return null;
-            }
-
-            try { File.SetLastAccessTimeUtc(cachePath, DateTime.UtcNow); }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            return cached;
-        }
-        catch (FileNotFoundException) { return null; }
-        catch (DirectoryNotFoundException) { return null; }
-        catch (JsonException)
-        {
-            TryDeleteStickerThumbnailCacheFile(cachePath);
-            return null;
-        }
-        catch (IOException) { return null; }
-        catch (UnauthorizedAccessException) { return null; }
-    }
-
-    private static async Task WriteStickerThumbnailCacheAsync(string cachePath, CachedStickerThumbnail cache)
-    {
-        var directory = Path.GetDirectoryName(cachePath);
-        if (string.IsNullOrWhiteSpace(directory)) return;
-        var temporaryPath = Path.Combine(directory, ".thumb-" + Guid.NewGuid().ToString("N") + ".tmp");
-        try
-        {
-            Directory.CreateDirectory(directory);
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(cache, JsonOptions);
-            await File.WriteAllBytesAsync(temporaryPath, bytes);
-            File.Move(temporaryPath, cachePath, overwrite: true);
-            TrimStickerThumbnailCache(directory);
-        }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-        finally
-        {
-            TryDeleteStickerThumbnailCacheFile(temporaryPath);
-        }
-    }
-
-    private static void TrimStickerThumbnailCache(string directory)
-    {
-        try
-        {
-            if (!Directory.Exists(directory)) return;
-            var files = Directory.EnumerateFiles(directory, "thumb-*.json")
-                .Select(path => new FileInfo(path))
-                .Where(file => file.Exists)
-                .OrderBy(file => file.LastAccessTimeUtc)
-                .ThenBy(file => file.LastWriteTimeUtc)
-                .ToList();
-            long total = files.Sum(file => file.Length);
-            foreach (var file in files)
-            {
-                if (total <= StickerThumbnailPersistentCacheLimit) break;
-                try
-                {
-                    var length = file.Length;
-                    file.Delete();
-                    total = Math.Max(0, total - length);
-                }
-                catch (FileNotFoundException) { }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-            }
-        }
-        catch (DirectoryNotFoundException) { }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-    }
-
-    private static void TryDeleteStickerThumbnailCacheFile(string path)
-    {
-        try
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-    }
-
-    private static (string DataUrl, long Size) CreateStickerThumbnail(byte[] bytes, string path)
-    {
-        try
-        {
-            using var input = new MemoryStream(bytes, writable: false);
-            var decoder = BitmapDecoder.Create(input, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            var frame = decoder.Frames.FirstOrDefault()
-                ?? throw new InvalidDataException("图片没有可用的图像帧。");
-            if (frame.PixelWidth <= 0 || frame.PixelHeight <= 0)
-                throw new InvalidDataException("图片尺寸无效。");
-
-            var scale = Math.Min(1d, Math.Min(
-                StickerThumbnailEdge / (double)frame.PixelWidth,
-                StickerThumbnailEdge / (double)frame.PixelHeight));
-            BitmapSource source = frame;
-            if (scale < 0.999d)
-            {
-                var transformed = new TransformedBitmap(frame, new ScaleTransform(scale, scale));
-                transformed.Freeze();
-                source = transformed;
-            }
-
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(source));
-            using var output = new MemoryStream();
-            encoder.Save(output);
-            var thumbnailBytes = output.ToArray();
-            return ("data:image/png;base64," + Convert.ToBase64String(thumbnailBytes), thumbnailBytes.LongLength);
-        }
-        catch (Exception ex) when (ex is FileFormatException or NotSupportedException or InvalidOperationException or ArgumentException)
-        {
-            var extension = Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
-            var svg = $"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{StickerThumbnailEdge}\" height=\"{StickerThumbnailEdge}\" viewBox=\"0 0 {StickerThumbnailEdge} {StickerThumbnailEdge}\"><rect width=\"100%\" height=\"100%\" rx=\"28\" fill=\"#17302d\"/><text x=\"50%\" y=\"50%\" dominant-baseline=\"middle\" text-anchor=\"middle\" fill=\"#a5e8d4\" font-family=\"Segoe UI,sans-serif\" font-size=\"34\" font-weight=\"700\">{extension}</text></svg>";
-            var svgBytes = Encoding.UTF8.GetBytes(svg);
-            return ("data:image/svg+xml;base64," + Convert.ToBase64String(svgBytes), svgBytes.LongLength);
-        }
-    }
-    private object PreviewStickerRows(JsonElement payload)
-    {
-        EnsureConnected();
-        if (_catalog is null || _catalogContent?.Text is null || _manifestContent?.Text is null)
-            throw new InvalidOperationException("标签目录不可编辑。");
-        var edits = payload.GetProperty("rows").Deserialize<List<StickerEditRow>>(JsonOptions) ?? [];
-        var byKey = edits.ToDictionary(x => x.Id + "\0" + x.ImagePath, StringComparer.OrdinalIgnoreCase);
-        var oldTags = _catalog.Rows.Select(x => x.TagsText).ToArray();
-        var oldWeights = _catalog.Rows.Select(x => x.Weight).ToArray();
-        string newCatalog;
-        string newManifest;
-        try
-        {
-            for (var i = 0; i < _catalog.Rows.Count; i++)
-            {
-                var row = _catalog.Rows[i];
-                if (!byKey.TryGetValue(row.Id + "\0" + row.ImagePath, out var edit))
-                    throw new InvalidDataException("标签列表结构已变化，请重新扫描。");
-                if (edit.TagsText.Length > 4000) throw new InvalidDataException("单条标签不能超过 4000 个字符。");
-                var weight = edit.Weight ?? row.Weight;
-                ValidateStickerWeight(weight);
-                row.TagsText = edit.TagsText;
-                row.Weight = weight;
-            }
-            newCatalog = _catalog.SerializeWithEdits();
-            using var _ = JsonDocument.Parse(newCatalog);
-            if (!StickerManifestSynchronizer.TryUpdate(_manifestContent.Text, _catalog.Rows, out newManifest, out var error))
-                throw new InvalidDataException(error);
-        }
-        finally
-        {
-            for (var i = 0; i < _catalog.Rows.Count; i++)
-            {
-                _catalog.Rows[i].TagsText = oldTags[i];
-                _catalog.Rows[i].Weight = oldWeights[i];
-            }
-        }
-        return new { before = "catalog.json\n" + _catalogContent.Text + "\n\n----- MANIFEST.md -----\n" + _manifestContent.Text,
-            after = "catalog.json\n" + newCatalog + "\n\n----- MANIFEST.md -----\n" + newManifest };
-    }
-    private async Task<object> SaveStickerRowsAsync(JsonElement payload)
-    {
-        EnsureConnected();
-        if (_catalog is null) throw new InvalidOperationException("标签目录不可编辑。");
-        var rows = payload.GetProperty("rows").Deserialize<List<StickerEditRow>>(JsonOptions) ?? [];
-        var byKey = rows.ToDictionary(x => x.Id + "\0" + x.ImagePath, StringComparer.OrdinalIgnoreCase);
-        foreach (var row in _catalog.Rows)
-        {
-            if (!byKey.TryGetValue(row.Id + "\0" + row.ImagePath, out var edit)) throw new InvalidDataException("标签列表结构已变化，请重新扫描。");
-            if (edit.TagsText.Length > 4000) throw new InvalidDataException("单条标签不能超过 4000 个字符。");
-            var weight = edit.Weight ?? row.Weight;
-            ValidateStickerWeight(weight);
-            row.TagsText = edit.TagsText;
-            row.Weight = weight;
-        }
-        var updatedCatalog = _catalog.SerializeWithEdits();
-        using var _ = JsonDocument.Parse(updatedCatalog);
-        if (_catalogContent?.Text is null || _manifestContent?.Text is null) throw new InvalidOperationException("标签原始内容没有加载。");
-        if (!StickerManifestSynchronizer.TryUpdate(_manifestContent.Text, _catalog.Rows, out var updatedManifest, out var error))
-            throw new InvalidDataException(error);
-        return await SaveStickerPairAsync(updatedCatalog, updatedManifest);
-    }
-
-    private async Task<object> SaveStickerRawAsync(JsonElement payload)
-    {
-        EnsureConnected();
-        if (_catalogContent?.Text is null || _manifestContent?.Text is null) throw new InvalidOperationException("请先读取表情包目录。");
-        var catalog = payload.GetProperty("catalog").GetString() ?? "";
-        var manifest = payload.GetProperty("manifest").GetString() ?? "";
-        using var _ = JsonDocument.Parse(catalog);
-        return await SaveStickerPairAsync(catalog, manifest);
-    }
-
-    private async Task<object> SaveStickerPairAsync(string updatedCatalog, string updatedManifest)
-    {
-        if (_catalogFile is null || _manifestFile is null || _catalogContent is null || _manifestContent is null || _snapshots is null)
-            throw new InvalidOperationException("标签文件或快照存储未就绪。");
-        var oldCatalog = _catalogContent;
-        var oldManifest = _manifestContent;
-        if (updatedCatalog == oldCatalog.Text && updatedManifest == oldManifest.Text) return new { changed = false, snapshotCount = 0, stickerFiles = GetStickerUiRows(), stickerEditingEnabled = _catalog is not null, catalogText = oldCatalog.Text, manifestText = oldManifest.Text };
-        SetBusy(true);
-        try
-        {
-            var catTask = _remote.ReadAsync(_settings.Connection, _catalogFile);
-            var manifestTask = _remote.ReadAsync(_settings.Connection, _manifestFile);
-            await Task.WhenAll(catTask, manifestTask);
-            var latestCatalog = catTask.Result;
-            var latestManifest = manifestTask.Result;
-            if (latestCatalog.Sha256 != oldCatalog.Sha256 || latestManifest.Sha256 != oldManifest.Sha256)
-                throw new RemoteConflictException("服务器上的目录文件已发生变化。没有覆盖；请重新扫描后再编辑。");
-
-            var snapshotCount = 0;
-            if (updatedCatalog != oldCatalog.Text)
-            {
-                await _snapshots.SaveAsync("stickers", "catalog.json", oldCatalog.RawBytes, oldCatalog.Sha256);
-                snapshotCount++;
-            }
-            if (updatedManifest != oldManifest.Text)
-            {
-                await _snapshots.SaveAsync("stickers", "MANIFEST.md", oldManifest.RawBytes, oldManifest.Sha256);
-                snapshotCount++;
-            }
-            var pair = await _remote.WriteStickerPairAsync(
-                _settings.Connection,
-                updatedCatalog,
-                oldCatalog.Sha256,
-                updatedManifest,
-                oldManifest.Sha256);
-
-            var catalogBytes = new UTF8Encoding(false).GetBytes(updatedCatalog);
-            var manifestBytes = new UTF8Encoding(false).GetBytes(updatedManifest);
-            _catalogContent = oldCatalog with { Text = updatedCatalog, RawBytes = catalogBytes, Sha256 = pair.CatalogSha256, Size = pair.CatalogSize, ModifiedUtc = DateTimeOffset.UtcNow };
-            _manifestContent = oldManifest with { Text = updatedManifest, RawBytes = manifestBytes, Sha256 = pair.ManifestSha256, Size = pair.ManifestSize, ModifiedUtc = DateTimeOffset.UtcNow };
-            var images = _files.Where(x => x.Root == "stickers" && x.IsImage).ToList();
-            StickerCatalogEditor.TryParse(updatedCatalog, images, out _catalog, out _);
-            return new { changed = true, snapshotCount, stickerFiles = GetStickerUiRows(), stickerEditingEnabled = _catalog is not null, catalogText = _catalogContent.Text, manifestText = _manifestContent.Text };
-        }
-        finally { SetBusy(false); }
-    }
-
-    private async Task<object> RenameStickerAsync(JsonElement payload)
-    {
-        EnsureConnected();
-        if (_busy) throw new InvalidOperationException("当前有操作正在进行。");
-        if (_catalog is null || _catalogContent?.Text is null || _manifestContent?.Text is null)
-            throw new InvalidOperationException("当前标签目录格式无法安全重命名，请先检查 catalog.json 与 MANIFEST.md。");
-
-        var oldName = payload.GetProperty("oldFileName").GetString() ?? "";
-        var newName = payload.GetProperty("newFileName").GetString() ?? "";
-        ValidateStickerFileName(newName);
-        if (oldName.Equals(newName, StringComparison.Ordinal))
-            throw new InvalidDataException("新文件名与当前文件名相同。");
-        if (!Path.GetExtension(oldName).Equals(Path.GetExtension(newName), StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("重命名不能改变图片格式或扩展名。");
-
-        var oldFile = _files.FirstOrDefault(x => x.Root == "stickers" && x.IsImage &&
-            x.RelativePath.Equals(oldName, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException("图片不在本次扫描的表情包目录中。");
-        if (_files.Any(x => x.Root == "stickers" && x.IsImage &&
-            x.RelativePath.Equals(newName, StringComparison.OrdinalIgnoreCase)))
-            throw new IOException("服务器已存在同名图片。");
-
-        var oldCatalogText = _catalogContent.Text;
-        var manifestSource = _manifestContent.Text;
-        var oldRow = _catalog.Rows.FirstOrDefault(x => x.ImagePath.Equals(oldName, StringComparison.OrdinalIgnoreCase));
-        if (oldRow is null)
-        {
-            var existingRows = _catalog.Rows.ToList();
-            if (!_catalog.TryAddImage(oldName, out var registeredRow, out var registerError))
-            {
-                RestoreStickerCatalog();
-                throw new InvalidDataException(registerError);
-            }
-            if (!StickerManifestSynchronizer.TryAppendRow(manifestSource, existingRows, registeredRow,
-                out var registeredManifest, out var registerManifestError))
-            {
-                RestoreStickerCatalog();
-                throw new InvalidDataException(registerManifestError);
-            }
-            manifestSource = registeredManifest;
-            oldRow = registeredRow;
-        }
-        if (!_catalog.TryRenameImage(oldName, newName, out var newRow, out var catalogError))
-        {
-            RestoreStickerCatalog();
-            throw new InvalidDataException(catalogError);
-        }
-
-        var updatedRows = _catalog.Rows.ToList();
-        var updatedCatalog = _catalog.SerializeWithEdits();
-        if (!StickerManifestSynchronizer.TryRenameReferences(manifestSource, oldRow, newRow,
-            updatedRows, out var updatedManifest, out var manifestError))
-        {
-            RestoreStickerCatalog();
-            throw new InvalidDataException(manifestError);
-        }
-
-        var plannedFiles = _files.Select(file => file.Key == oldFile.Key
-            ? new RemoteFile
-            {
-                Root = file.Root, RelativePath = newName, Kind = file.Kind, Size = file.Size,
-                Sha256 = file.Sha256, ModifiedUtc = file.ModifiedUtc, Editable = file.Editable
-            }
-            : file).ToList();
-        if (!StickerCatalogEditor.TryParse(updatedCatalog, plannedFiles.Where(x => x.Root == "stickers" && x.IsImage).ToList(),
-            out _, out var parseError))
-        {
-            RestoreStickerCatalog();
-            throw new InvalidDataException("不能安全重命名：" + parseError);
-        }
-
-        SetBusy(true);
-        try
-        {
-            var currentImage = await _remote.ReadAsync(_settings.Connection, oldFile);
-            var moved = await _remote.RenameStickerAsync(_settings.Connection, oldName, newName, currentImage.Sha256);
-            _files = plannedFiles.Select(file => file.Root == "stickers" && file.RelativePath == newName
-                ? new RemoteFile
-                {
-                    Root = file.Root, RelativePath = file.RelativePath, Kind = file.Kind, Size = moved.Size,
-                    Sha256 = moved.Sha256, ModifiedUtc = DateTimeOffset.UtcNow, Editable = false
-                }
-                : file).ToList();
-
-            try { await SaveStickerPairAsync(updatedCatalog, updatedManifest); }
-            catch (Exception saveError)
-            {
-                try
-                {
-                    await _remote.RenameStickerAsync(_settings.Connection, newName, oldName, moved.Sha256);
-                    _files = _files.Select(file => file.Root == "stickers" && file.RelativePath == newName
-                        ? new RemoteFile
-                        {
-                            Root = "stickers", RelativePath = oldName, Kind = "image", Size = currentImage.Size,
-                            Sha256 = currentImage.Sha256, ModifiedUtc = currentImage.ModifiedUtc, Editable = false
-                        }
-                        : file).ToList();
-                }
-                catch (Exception rollbackError)
-                {
-                    _serverConnected = false;
-                    throw new InvalidOperationException("目录保存失败且图片名自动回滚失败，请重新连接扫描。保存错误：" +
-                        saveError.Message + "；回滚错误：" + rollbackError.Message, rollbackError);
-                }
-                RestoreStickerCatalog();
-                throw new InvalidOperationException("目录保存失败，图片文件名已自动恢复。原因：" + saveError.Message, saveError);
-            }
-
-            var count = _files.Count(x => x.Root == "stickers" && x.IsImage);
-            return new
-            {
-                oldFileName = oldName,
-                fileName = newName,
-                size = moved.Size,
-                sha256 = moved.Sha256,
-                stickerCount = count,
-                stickerFiles = GetStickerUiRows(),
-                stickerEditingEnabled = _catalog is not null,
-                catalogText = _catalogContent?.Text,
-                manifestText = _manifestContent?.Text
-            };
-        }
-        catch
-        {
-            if (_catalogContent?.Text == oldCatalogText) RestoreStickerCatalog();
-            throw;
-        }
-        finally { SetBusy(false); }
-    }
-
-    private static void ValidateStickerFileName(string fileName)
-    {
-        if (string.IsNullOrWhiteSpace(fileName) || fileName is "." or ".." ||
-            fileName.Length > 180 || fileName.Contains('/') || fileName.Contains('\\') ||
-            fileName.Any(char.IsControl) || fileName.EndsWith('.') || fileName.EndsWith(' ') ||
-            Path.GetFileName(fileName) != fileName)
-            throw new InvalidDataException("图片文件名无效；请使用不超过 180 个字符的单层文件名。");
-        if (Path.GetExtension(fileName).ToLowerInvariant() is not (".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp"))
-            throw new InvalidDataException("仅支持 PNG、JPG、GIF、WEBP、BMP 图片。");
-    }
-
-    private void RestoreStickerCatalog()
-    {
-        if (_catalogContent?.Text is null)
-        {
-            _catalog = null;
-            return;
-        }
-        StickerCatalogEditor.TryParse(_catalogContent.Text,
-            _files.Where(x => x.Root == "stickers" && x.IsImage).ToList(), out _catalog, out _);
-    }
-
-    private object BeginStickerUpload(JsonElement payload)
-    {
-        EnsureConnected();
-        if (_stickerUploads.Count >= 3) throw new InvalidOperationException("请先完成当前上传，再开始其他上传。");
-        var fileName = payload.GetProperty("fileName").GetString() ?? "";
-        var size = payload.GetProperty("size").GetInt64();
-        var extension = Path.GetExtension(fileName).ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(fileName) || fileName is "." or ".." ||
-            fileName.Length > 180 || fileName.Contains('/') || fileName.Contains('\\') ||
-            fileName.Any(char.IsControl) || fileName.EndsWith('.') || fileName.EndsWith(' ') ||
-            Path.GetFileName(fileName) != fileName)
-            throw new InvalidDataException("图片文件名无效；请使用单层文件名。 ");
-        if (extension is not (".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp"))
-            throw new InvalidDataException("仅支持 PNG、JPG、GIF、WEBP、BMP 图片。");
-        if (size is < 1 or > StickerUploadLimit) throw new InvalidDataException("每张图片大小需在 1 B 到 16 MiB 之间。");
-        if (_files.Any(x => x.Root == "stickers" && x.RelativePath.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
-            throw new IOException("表情包目录中已有同名文件，请先重命名图片。");
-        var id = Guid.NewGuid().ToString("N");
-        var stagingDirectory = Path.Combine(_settings.PrivateDirectory, "UploadStaging");
-        Directory.CreateDirectory(stagingDirectory);
-        var temporaryPath = Path.Combine(stagingDirectory, ".upload-" + id + ".part");
-        _stickerUploads[id] = new StickerUploadSession(fileName, size, temporaryPath);
-        return new { uploadId = id, chunkBytes = StickerUploadChunkLimit };
-    }
-
-    private object AppendStickerUpload(JsonElement payload)
-    {
-        var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
-        if (!_stickerUploads.TryGetValue(uploadId, out var session)) throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
-        byte[] chunk;
-        try { chunk = Convert.FromBase64String(payload.GetProperty("contentBase64").GetString() ?? ""); }
-        catch (FormatException) { _stickerUploads.Remove(uploadId); session.Dispose(); throw new InvalidDataException("上传数据编码无效。"); }
-        if (chunk.Length is < 1 or > StickerUploadChunkLimit || session.Content.Length + chunk.Length > session.Size)
-        {
-            _stickerUploads.Remove(uploadId);
-            session.Dispose();
-            throw new InvalidDataException("上传分块大小或总长度超出限制。");
-        }
-        session.Content.Write(chunk, 0, chunk.Length);
-        return new { receivedBytes = session.Content.Length, totalBytes = session.Size };
-    }
-
-    private async Task<object> CommitStickerUploadAsync(JsonElement payload)
-    {
-        EnsureConnected();
-        var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
-        if (!_stickerUploads.Remove(uploadId, out var session)) throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
-        using (session)
-        {
-            if (session.Content.Length != session.Size) throw new InvalidDataException("上传内容长度不完整，请重新上传。");
-            session.Content.Flush(flushToDisk: true);
-            session.Content.Position = 0;
-            var header = new byte[Math.Min(16 * 1024, session.Size)];
-            var headerBytes = await session.Content.ReadAsync(header.AsMemory(0, header.Length));
-            if (!MatchesStickerImage(session.FileName, header.AsSpan(0, headerBytes).ToArray())) throw new InvalidDataException("文件内容与扩展名不匹配，或图片格式不受支持。");
-            session.Content.Position = 0;
-            if (_catalog is null || _catalogContent?.Text is null || _manifestContent?.Text is null)
-                throw new InvalidOperationException("当前标签目录格式无法安全自动登记，请先检查 catalog.json 与 MANIFEST.md。");
-
-            var existingRows = _catalog.Rows.ToList();
-            if (!_catalog.TryAddImage(session.FileName, out var addedRow, out var addError))
-                throw new InvalidDataException(addError);
-            var updatedCatalog = _catalog.SerializeWithEdits();
-            if (!StickerManifestSynchronizer.TryAppendRow(_manifestContent.Text, existingRows, addedRow,
-                out var appendedManifest, out var appendError))
-            {
-                RestoreStickerCatalog();
-                throw new InvalidDataException("图片尚未上传：" + appendError);
-            }
-            var updatedRows = _catalog.Rows.ToList();
-            if (!StickerManifestSynchronizer.TryUpdate(appendedManifest, updatedRows,
-                out var updatedManifest, out var verifyError))
-            {
-                RestoreStickerCatalog();
-                throw new InvalidDataException("图片尚未上传，无法校验自动登记：" + verifyError);
-            }
-
-            SetBusy(true);
-            try
-            {
-                RemoteStickerUploadResult uploaded;
-                try { uploaded = await _remote.UploadStickerAsync(_settings.Connection, session.FileName, session.Content, session.Size); }
-                catch { RestoreStickerCatalog(); throw; }
-
-                _files = _files.Append(new RemoteFile
-                {
-                    Root = "stickers", RelativePath = uploaded.RelativePath, Kind = "image", Size = uploaded.Size,
-                    Sha256 = uploaded.Sha256, ModifiedUtc = DateTimeOffset.UtcNow, Editable = false
-                }).ToList();
-
-                try { await SaveStickerPairAsync(updatedCatalog, updatedManifest); }
-                catch (Exception registrationError)
-                {
-                    RestoreStickerCatalog();
-                    var countAfterUpload = _files.Count(x => x.Root == "stickers" && x.IsImage);
-                    return new
-                    {
-                        fileName = uploaded.RelativePath,
-                        size = uploaded.Size,
-                        sha256 = uploaded.Sha256,
-                        stickerCount = countAfterUpload,
-                        stickerFiles = GetStickerUiRows(),
-                        stickerEditingEnabled = _catalog is not null,
-                        registered = false,
-                        registrationError = registrationError.Message,
-                        catalogText = _catalogContent?.Text,
-                        manifestText = _manifestContent?.Text
-                    };
-                }
-
-                var count = _files.Count(x => x.Root == "stickers" && x.IsImage);
-                return new
-                {
-                    fileName = uploaded.RelativePath,
-                    size = uploaded.Size,
-                    sha256 = uploaded.Sha256,
-                    stickerCount = count,
-                    stickerFiles = GetStickerUiRows(),
-                    stickerEditingEnabled = _catalog is not null,
-                    registered = true,
-                    registrationError = "",
-                    catalogText = _catalogContent?.Text,
-                    manifestText = _manifestContent?.Text
-                };
-            }
-            finally { SetBusy(false); }
-        }
-    }
-
-    private object CancelStickerUpload(JsonElement payload)
-    {
-        var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
-        if (_stickerUploads.Remove(uploadId, out var session)) session.Dispose();
-        return new { cancelled = true };
-    }
-
-    private static bool MatchesStickerImage(string fileName, byte[] bytes)
-    {
-        var extension = Path.GetExtension(fileName).ToLowerInvariant();
-        return extension switch
-        {
-            ".png" => bytes.Length >= 8 && bytes.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
-            ".jpg" or ".jpeg" => bytes.Length >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff,
-            ".gif" => bytes.Length >= 6 && (Encoding.ASCII.GetString(bytes, 0, 6) is "GIF87a" or "GIF89a"),
-            ".webp" => bytes.Length >= 12 && Encoding.ASCII.GetString(bytes, 0, 4) == "RIFF" && Encoding.ASCII.GetString(bytes, 8, 4) == "WEBP",
-            ".bmp" => bytes.Length >= 2 && bytes[0] == (byte)'B' && bytes[1] == (byte)'M',
-            _ => false
-        };
-    }
-
-    private List<StickerUiRow> GetStickerUiRows()
-    {
-        var rows = (_catalog?.Rows ?? []).Select(row => new StickerUiRow(row.Id, row.ImagePath, row.TagsText, row.Weight, true)).ToList();
-        var known = new HashSet<string>(rows.Select(x => x.ImagePath), StringComparer.OrdinalIgnoreCase);
-        foreach (var file in _files.Where(x => x.Root == "stickers" && x.IsImage))
-        {
-            if (known.Add(file.RelativePath))
-                rows.Add(new StickerUiRow(Path.GetFileNameWithoutExtension(file.RelativePath), file.RelativePath, "", 1, false));
-        }
-        return rows;
-    }
-    private async Task<object> BackupAsync()
-    {
-        EnsureConnected();
-        if (_busy) throw new InvalidOperationException("当前有操作正在进行。");
-        var pauseController = new BackupPauseController();
-        using var backupCancellation = new CancellationTokenSource();
-        _backupPauseController = pauseController;
-        _backupCancellation = backupCancellation;
-        _lastBackupProgress = null;
-        SetBusy(true);
-        try
-        {
-            var progress = new Progress<ServerSnapshotProgress>(snapshotProgress =>
-            {
-                _lastBackupProgress = snapshotProgress;
-                SendProgress("backup", snapshotProgress);
-            });
-            var result = await new LocalServerBackupStore(SettingsRepository.DefaultBackupDirectory)
-                .CreateAsync(_settings.Connection, _remote, progress, pauseController, backupCancellation.Token);
-            return new { directory = result.Directory, archivePath = result.ArchivePath, archiveBytes = result.ArchiveBytes, sha256 = result.Sha256 };
-        }
-        catch (OperationCanceledException) when (backupCancellation.IsCancellationRequested)
-        {
-            var current = _lastBackupProgress;
-            SendProgress("backup", new ServerSnapshotProgress(
-                "cancelled",
-                current?.Bytes ?? 0,
-                current?.TotalBytes,
-                null,
-                null,
-                current?.Attempt ?? 1,
-                current?.MaxAttempts ?? 8,
-                "备份已取消，临时文件已清理。"));
-            throw;
-        }
-        finally
-        {
-            _backupPauseController = null;
-            if (ReferenceEquals(_backupCancellation, backupCancellation))
-                _backupCancellation = null;
-            _lastBackupProgress = null;
-            SetBusy(false);
-        }
-    }
-
-    private object CancelBackup()
-    {
-        var cancellation = _backupCancellation
-            ?? throw new InvalidOperationException("当前没有正在运行的服务器备份。");
-        if (!cancellation.IsCancellationRequested)
-        {
-            _backupPauseController?.Resume();
-            cancellation.Cancel();
-            var current = _lastBackupProgress ?? new ServerSnapshotProgress("transferring", 0, null, null, null, 1, 8);
-            SendProgress("backup", current with
-            {
-                Phase = "cancelling",
-                BytesPerSecond = 0,
-                RemainingSeconds = null,
-                Message = "正在取消备份并清理临时文件…"
-            });
-        }
-        return new { cancelling = true };
-    }
-
-    private object ToggleBackupPause()
-    {
-        var controller = _backupPauseController
-            ?? throw new InvalidOperationException("当前没有正在运行的服务器备份。");
-        if (controller.IsPaused)
-        {
-            controller.Resume();
-            if (_lastBackupProgress is not null)
-                SendProgress("backup", _lastBackupProgress);
-            return new { paused = false };
-        }
-
-        controller.Pause();
-        var current = _lastBackupProgress ?? new ServerSnapshotProgress("preparing", 0, null, null, null, 1, 8);
-        SendProgress("backup", current with
-        {
-            Phase = "paused",
-            BytesPerSecond = 0,
-            RemainingSeconds = null,
-            Message = "备份已暂停；本地临时归档和当前 SSH 数据流均已保留。"
-        });
-        return new { paused = true };
-    }
-
     private void EnsureConnected()
     {
         if (!_serverConnected) throw new InvalidOperationException("请先连接服务器并扫描文件。");
@@ -1044,19 +280,7 @@ public partial class MainWindow : Window
     private void SetBusy(bool busy)
     {
         _busy = busy;
-        SendProgress("busy", new { busy });
-    }
-
-    private void Respond(string id, bool ok, object? data, string? error)
-    {
-        if (MainWebView.CoreWebView2 is null) return;
-        MainWebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new BridgeResponse(id, ok, data, error), JsonOptions));
-    }
-
-    private void SendProgress(string command, object data)
-    {
-        if (MainWebView.CoreWebView2 is null) return;
-        MainWebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new BridgeEvent("progress", command, data), JsonOptions));
+        _bridgeResponses.SendProgress("busy", new { busy });
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
@@ -1067,43 +291,9 @@ public partial class MainWindow : Window
             if (answer != MessageBoxResult.Yes) e.Cancel = true;
         }
         if (e.Cancel) return;
-        _backupPauseController?.Resume();
-        _backupCancellation?.Cancel();
-        foreach (var session in _stickerUploads.Values) session.Dispose();
-        _stickerUploads.Clear();
+        _backup?.Dispose();
+        _stickers?.Dispose();
         _remote.Dispose();
     }
 
-    private sealed record BridgeRequest(string Id, string Command, JsonElement Payload);
-    private sealed record BridgeResponse(string Id, bool Ok, object? Data, string? Error);
-    private sealed record BridgeEvent(string Type, string Command, object Data);
-    private sealed record CachedStickerThumbnail(string DataUrl, long Size, long OriginalSize, int ThumbnailEdge);
-    private static void ValidateStickerWeight(double weight)
-    {
-        if (!double.IsFinite(weight) || weight < 0 || weight > 1_000_000)
-            throw new InvalidDataException("表情包权重必须是 0 到 1,000,000 之间的有限数字。");
-    }
-
-    private sealed record StickerEditRow(string Id, string ImagePath, string TagsText, double? Weight = null);
-    private sealed record StickerUiRow(string Id, string ImagePath, string TagsText, double Weight, bool Catalogued);
-    private sealed class StickerUploadSession : IDisposable
-    {
-        public StickerUploadSession(string fileName, long size, string temporaryPath)
-        {
-            FileName = fileName;
-            Size = size;
-            TemporaryPath = temporaryPath;
-            Content = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
-                256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
-        }
-        public string FileName { get; }
-        public long Size { get; }
-        public string TemporaryPath { get; }
-        public FileStream Content { get; }
-        public void Dispose()
-        {
-            Content.Dispose();
-            try { File.Delete(TemporaryPath); } catch { }
-        }
-    }
 }

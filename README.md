@@ -59,10 +59,16 @@ OpenClaw-Debugger/
 │   ├── styles.css         # 布局、主题和动效
 │   └── app.js             # 页面交互、主题、上传和 WebView 消息调用
 ├── App.xaml(.cs)          # WPF 应用入口
-├── MainWindow.xaml(.cs)   # WebView2 宿主、消息桥接、操作流程
+├── MainWindow.xaml(.cs)   # WebView2 宿主、连接和记忆文件流程
+├── BridgeDispatcher.cs    # WebView 消息解析、来源校验和命令分发
+├── BridgeResponseWriter.cs # WebView 响应和进度事件输出
 ├── Models.cs             # 设置和数据模型
-├── RemoteOpenClawClient.cs # SSH 会话、远程路径校验、记忆和表情包操作
+├── RemoteOpenClawClient.cs # SSH 会话、远程路径校验和远程文件传输原语
 ├── RemoteSnapshotClient.cs  # 服务器快照生成、断点传输和清理
+├── BackupCoordinator.cs   # 备份启动、暂停、继续、取消和进度协调
+├── StickerService.cs      # 表情包目录、标签、重命名和上传业务
+├── StickerUploadService.cs # 分块上传会话和本地临时文件
+├── StickerThumbnailCache.cs # 缩略图生成、持久化和容量清理
 ├── StickerCatalogEditor.cs # 表情包目录格式读取、编辑和同步
 ├── LocalSnapshotStore.cs  # DPAPI 加密的远端文件回滚副本
 ├── LocalServerBackupStore.cs # 整机归档和本机清单写入
@@ -91,7 +97,9 @@ OpenClaw-Debugger/
 
 - `WebUi/` 是 HTML UI 的唯一界面层；静态资源随构建复制。不要把远程 CDN 作为运行依赖。
 - UI 通过映射到固定来源 `https://openclaw.local` 的 WebView2 页面加载，并通过类型化消息调用宿主功能。
-- `MainWindow.xaml.cs` 是宿主桥接入口。只添加具体、有限的操作，不接受来自 UI 的任意 shell 命令。
+- `MainWindow.xaml.cs` 只负责 WebView 生命周期、设置、连接和记忆文件流程；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件。
+- `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
+- `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责远程快照传输。
 - `RemoteOpenClawClient.cs` 管理复用 SSH 会话、允许的远程目录、文件校验和表情包操作；`RemoteSnapshotClient.cs` 只负责服务器快照生成、断点传输、错误分类和临时文件清理。新增远程功能时应遵循现有路径限制和哈希冲突检查。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
