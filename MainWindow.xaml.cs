@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     private bool _serverConnected;
     private bool _busy;
     private BackupPauseController? _backupPauseController;
+    private CancellationTokenSource? _backupCancellation;
     private ServerSnapshotProgress? _lastBackupProgress;
     private bool _hasDrafts;
     private bool _closingApproved;
@@ -150,6 +151,8 @@ public partial class MainWindow : Window
                 return await BackupAsync();
             case "toggleBackupPause":
                 return ToggleBackupPause();
+            case "cancelBackup":
+                return CancelBackup();
             case "openBackupFolder":
                 Directory.CreateDirectory(SettingsRepository.DefaultBackupDirectory);
                 Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { SettingsRepository.DefaultBackupDirectory } });
@@ -772,7 +775,9 @@ public partial class MainWindow : Window
         EnsureConnected();
         if (_busy) throw new InvalidOperationException("当前有操作正在进行。");
         var pauseController = new BackupPauseController();
+        using var backupCancellation = new CancellationTokenSource();
         _backupPauseController = pauseController;
+        _backupCancellation = backupCancellation;
         _lastBackupProgress = null;
         SetBusy(true);
         try
@@ -783,15 +788,51 @@ public partial class MainWindow : Window
                 SendProgress("backup", snapshotProgress);
             });
             var result = await new LocalServerBackupStore(SettingsRepository.DefaultBackupDirectory)
-                .CreateAsync(_settings.Connection, _remote, progress, pauseController);
+                .CreateAsync(_settings.Connection, _remote, progress, pauseController, backupCancellation.Token);
             return new { directory = result.Directory, archivePath = result.ArchivePath, archiveBytes = result.ArchiveBytes, sha256 = result.Sha256 };
+        }
+        catch (OperationCanceledException) when (backupCancellation.IsCancellationRequested)
+        {
+            var current = _lastBackupProgress;
+            SendProgress("backup", new ServerSnapshotProgress(
+                "cancelled",
+                current?.Bytes ?? 0,
+                current?.TotalBytes,
+                null,
+                null,
+                current?.Attempt ?? 1,
+                current?.MaxAttempts ?? 8,
+                "备份已取消，临时文件已清理。"));
+            throw;
         }
         finally
         {
             _backupPauseController = null;
+            if (ReferenceEquals(_backupCancellation, backupCancellation))
+                _backupCancellation = null;
             _lastBackupProgress = null;
             SetBusy(false);
         }
+    }
+
+    private object CancelBackup()
+    {
+        var cancellation = _backupCancellation
+            ?? throw new InvalidOperationException("当前没有正在运行的服务器备份。");
+        if (!cancellation.IsCancellationRequested)
+        {
+            _backupPauseController?.Resume();
+            cancellation.Cancel();
+            var current = _lastBackupProgress ?? new ServerSnapshotProgress("transferring", 0, null, null, null, 1, 8);
+            SendProgress("backup", current with
+            {
+                Phase = "cancelling",
+                BytesPerSecond = 0,
+                RemainingSeconds = null,
+                Message = "正在取消备份并清理临时文件…"
+            });
+        }
+        return new { cancelling = true };
     }
 
     private object ToggleBackupPause()
@@ -849,6 +890,8 @@ public partial class MainWindow : Window
             if (answer != MessageBoxResult.Yes) e.Cancel = true;
         }
         if (e.Cancel) return;
+        _backupPauseController?.Resume();
+        _backupCancellation?.Cancel();
         foreach (var session in _stickerUploads.Values) session.Dispose();
         _stickerUploads.Clear();
     }

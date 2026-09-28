@@ -92,14 +92,25 @@
 
   function syncBackupButton() {
     const button = $('#backupButton');
+    const cancelButton = $('#cancelBackupButton');
+    const actions = $('.top-actions');
     const connected = $('.connection-chip').classList.contains('connected');
+    actions.classList.toggle('backup-controls-active', backupActive && !backupControlsClosing);
+    cancelButton.hidden = false;
+    cancelButton.setAttribute('aria-hidden', String(!backupActive || backupControlsClosing));
     if (backupActive) {
-      button.disabled = false;
-      button.innerHTML = backupPaused ? '▶ <span>继续备份</span>' : 'Ⅱ <span>暂停备份</span>';
+      button.disabled = backupCancelRequested;
+      button.innerHTML = backupCancelRequested
+        ? '… <span>正在取消</span>'
+        : (backupPaused ? '▶ <span>继续备份</span>' : 'Ⅱ <span>暂停备份</span>');
+      cancelButton.disabled = backupCancelRequested;
+      cancelButton.innerHTML = backupCancelRequested ? '… <span>正在取消</span>' : '✕ <span>取消备份</span>';
       return;
     }
     button.innerHTML = '▣ <span>备份服务器</span>';
     button.disabled = !connected;
+    cancelButton.disabled = true;
+    cancelButton.innerHTML = '✕ <span>取消备份</span>';
   }
 
   function setBusy(busy) {
@@ -109,7 +120,7 @@
     $('#connectButton').disabled = busyNow;
     $('#refreshButton').disabled = busyNow || !connected;
     if (backupActive) {
-      $('#backupButton').disabled = false;
+      $('#backupButton').disabled = backupCancelRequested;
     } else {
       $('#backupButton').disabled = busyNow || !connected;
     }
@@ -167,6 +178,8 @@
   let lastBackupProgress = null;
   let backupActive = false;
   let backupPaused = false;
+  let backupCancelRequested = false;
+  let backupControlsClosing = false;
 
   function renderBackupProgress(data) {
     lastBackupProgress = data;
@@ -224,6 +237,30 @@
       track.setAttribute('aria-busy', 'true');
       track.removeAttribute('aria-valuenow');
       bar.style.width = '';
+      return;
+    }
+    if (phase === 'cancelling') {
+      const percent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
+      $('#backupProgressTitle').textContent = '正在取消服务器备份';
+      $('#backupProgressDetail').textContent = data.message || '正在终止 SSH 数据流并清理临时文件';
+      $('#backupProgressPercent').textContent = percent + '%';
+      $('#backupSpeed').textContent = '正在停止';
+      $('#backupEta').textContent = '清理中';
+      track.setAttribute('aria-busy', 'true');
+      track.setAttribute('aria-valuenow', String(percent));
+      bar.style.width = percent + '%';
+      return;
+    }
+
+    if (phase === 'cancelled') {
+      $('#backupProgressTitle').textContent = '备份已取消';
+      $('#backupProgressDetail').textContent = data.message || '临时文件已清理，可以重新开始备份';
+      $('#backupProgressPercent').textContent = '已取消';
+      $('#backupSpeed').textContent = '—';
+      $('#backupEta').textContent = '可重新备份';
+      track.removeAttribute('aria-busy');
+      track.setAttribute('aria-valuenow', '0');
+      bar.style.width = '0%';
       return;
     }
 
@@ -796,6 +833,8 @@
     if (!$('.connection-chip').classList.contains('connected')) return;
     backupActive = true;
     backupPaused = false;
+    backupCancelRequested = false;
+    backupControlsClosing = false;
     syncBackupButton();
     lastBackupProgress = null;
     renderBackupProgress({ phase: 'estimating', bytes: 0, totalBytes: null, attempt: 1, maxAttempts: 8 });
@@ -807,12 +846,25 @@
       const okay = window.confirm('服务器快照已完成。\n\n位置：' + result.directory + '\n压缩包：' + result.archivePath + '\n大小：' + sizeLabel(result.archiveBytes) + '\nSHA-256：' + result.sha256 + '\n\n是否打开备份目录？');
       if (okay) await bridgeCall('openBackupFolder', {});
     } catch (error) {
-      reportError(error);
       const last = lastBackupProgress || {};
-      renderBackupProgress({ phase: 'failed', bytes: 0, totalBytes: last.totalBytes, message: error && error.message ? error.message : String(error) });
+      if (backupCancelRequested) {
+        renderBackupProgress({
+          phase: 'cancelled',
+          bytes: Number(last.bytes) || 0,
+          totalBytes: last.totalBytes,
+          message: '备份已取消，临时文件已清理。'
+        });
+        setStatus('服务器备份已取消。');
+        showToast('服务器备份已取消。');
+      } else {
+        reportError(error);
+        renderBackupProgress({ phase: 'failed', bytes: 0, totalBytes: last.totalBytes, message: error && error.message ? error.message : String(error) });
+      }
     } finally {
       backupActive = false;
       backupPaused = false;
+      backupCancelRequested = false;
+      backupControlsClosing = false;
       setBusy(false);
       syncBackupButton();
     }
@@ -820,6 +872,7 @@
 
   async function toggleBackupPause() {
     if (!backupActive) return backupServer();
+    if (backupCancelRequested) return;
     try {
       const result = await bridgeCall('toggleBackupPause', {});
       backupPaused = Boolean(result && result.paused);
@@ -829,6 +882,29 @@
     }
   }
 
+  async function cancelBackup() {
+    if (!backupActive || backupCancelRequested) return;
+    backupCancelRequested = true;
+    backupControlsClosing = true;
+    const last = lastBackupProgress || {};
+    renderBackupProgress({
+      phase: 'cancelling',
+      bytes: Number(last.bytes) || 0,
+      totalBytes: last.totalBytes,
+      attempt: Number(last.attempt) || 1,
+      maxAttempts: Number(last.maxAttempts) || 8,
+      message: '正在取消备份并清理临时文件…'
+    });
+    syncBackupButton();
+    try {
+      await bridgeCall('cancelBackup', {});
+    } catch (error) {
+      backupCancelRequested = false;
+      backupControlsClosing = false;
+      syncBackupButton();
+      reportError(error);
+    }
+  }
   function openRawEditor() {
     if (!stickerEditingEnabled) return;
     $('#rawCatalog').value = originalCatalog;
@@ -879,6 +955,7 @@
     $('#connectButton').addEventListener('click', connectServer);
     $('#refreshButton').addEventListener('click', connectServer);
     $('#backupButton').addEventListener('click', toggleBackupPause);
+    $('#cancelBackupButton').addEventListener('click', cancelBackup);
     $('#settingsConnectButton').addEventListener('click', () => saveConnectionSettings(true));
     $('#saveSettingsButton').addEventListener('click', () => saveConnectionSettings(false));
     $('#openPrivateButton').addEventListener('click', () => bridgeCall('openPrivateFolder', {}).catch(reportError));
