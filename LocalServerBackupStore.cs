@@ -26,7 +26,7 @@ public sealed class LocalServerBackupStore(string rootDirectory)
 
     public async Task<ServerSnapshotResult> CreateAsync(
         ConnectionSettings settings,
-        RemoteOpenClawClient remote,
+        IRemoteSnapshotClient remote,
         IProgress<ServerSnapshotProgress>? progress = null,
         BackupPauseController? pauseController = null,
         CancellationToken cancellationToken = default)
@@ -146,7 +146,7 @@ public sealed class LocalServerBackupStore(string rootDirectory)
 
     private static async Task CreateRemoteSnapshotWithRetryAsync(
         ConnectionSettings settings,
-        RemoteOpenClawClient remote,
+        IRemoteSnapshotClient remote,
         string remoteArchive,
         IProgress<ServerSnapshotProgress>? progress,
         BackupPauseController? pauseController,

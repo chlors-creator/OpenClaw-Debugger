@@ -55,21 +55,39 @@ OpenClaw-Debugger/
 │   ├── Backgrounds/       # Atri、洛茜主题背景
 │   └── OpenClawDebugger.ico
 ├── WebUi/
-│   ├── index.html         # 页面结构
-│   ├── styles.css         # 布局、主题和动效
-│   └── app.js             # 页面交互、主题、上传和 WebView 消息调用
+│   ├── index.html         # 页面结构和资源加载顺序
+│   ├── styles.css         # 基础布局、组件和动效
+│   ├── styles-overrides.css # 主题、调色板、上传和备份覆盖样式
+│   ├── bridge.js          # WebView 消息请求/响应和进度事件
+│   ├── theme.js           # 主题、调色板和背景调节控制器
+│   ├── sticker-cache.js    # 原图/缩略图缓存控制器
+│   └── app.js             # 页面编排、列表渲染、编辑和事件绑定
 ├── App.xaml(.cs)          # WPF 应用入口
-├── MainWindow.xaml(.cs)   # WebView2 宿主、连接和记忆文件流程
+├── MainWindow.xaml(.cs)   # WebView2 生命周期、连接流程和消息编排
 ├── BridgeDispatcher.cs    # WebView 消息解析、来源校验和命令分发
 ├── BridgeResponseWriter.cs # WebView 响应和进度事件输出
-├── Models.cs             # 设置和数据模型
-├── RemoteOpenClawClient.cs # SSH 会话、远程路径校验和远程文件传输原语
-├── RemoteSnapshotClient.cs  # 服务器快照生成、断点传输和清理
+├── ConnectionSettings.cs  # SSH 和远程目录设置模型
+├── RemoteFile.cs          # 远程清单文件模型
+├── RemoteFileContent.cs   # 远程文件读取结果模型
+├── StickerRow.cs          # 表情包目录行模型
+├── UserSettings.cs        # 本机设置模型
+├── RemoteClientInterfaces.cs # 文件、表情包和快照客户端边界
+├── RemoteOpenClawClient.cs # 复用 SSH 会话和远程代理调用原语
+├── RemoteFileClient.cs    # 文件域客户端适配器
+├── RemoteStickerClient.cs # 表情包域客户端适配器
+├── RemoteAgentProgram.cs  # 独立维护的服务器端 Python 代理
+├── SshCommandRunner.cs    # OpenSSH 参数、校验和错误分类
+├── RemoteSnapshotClient.cs # 快照域客户端门面
+├── RemoteSnapshotTransport.cs # 快照生成、断点传输和清理实现
 ├── BackupCoordinator.cs   # 备份启动、暂停、继续、取消和进度协调
 ├── StickerService.cs      # 表情包目录、标签、重命名和上传业务
 ├── StickerUploadService.cs # 分块上传会话和本地临时文件
 ├── StickerThumbnailCache.cs # 缩略图生成、持久化和容量清理
-├── StickerCatalogEditor.cs # 表情包目录格式读取、编辑和同步
+├── ParsedStickerCatalog.cs # 解析后的目录编辑模型
+├── StickerCatalogEditor.cs # 表情包目录格式识别和 JSON 编辑
+├── StickerManifestSynchronizer.cs # MANIFEST.md 表格同步
+├── MemoryService.cs       # 记忆文件读取、冲突检测和回滚快照
+├── SettingsService.cs     # 设置校验、主题保存和配置持久化
 ├── LocalSnapshotStore.cs  # DPAPI 加密的远端文件回滚副本
 ├── LocalServerBackupStore.cs # 整机归档和本机清单写入
 ├── SettingsRepository.cs  # 私密目录和本机设置
@@ -97,12 +115,20 @@ OpenClaw-Debugger/
 
 - `WebUi/` 是 HTML UI 的唯一界面层；静态资源随构建复制。不要把远程 CDN 作为运行依赖。
 - UI 通过映射到固定来源 `https://openclaw.local` 的 WebView2 页面加载，并通过类型化消息调用宿主功能。
-- `MainWindow.xaml.cs` 只负责 WebView 生命周期、设置、连接和记忆文件流程；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件。
+- `MainWindow.xaml.cs` 只负责 WebView 生命周期、连接状态和消息编排；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件。
+- `MemoryService.cs` 负责记忆文件读取、二次哈希校验、DPAPI 回滚快照和保存；`SettingsService.cs` 负责连接设置校验及主题偏好持久化。
 - `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
-- `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责远程快照传输。
-- `RemoteOpenClawClient.cs` 管理复用 SSH 会话、允许的远程目录、文件校验和表情包操作；`RemoteSnapshotClient.cs` 只负责服务器快照生成、断点传输、错误分类和临时文件清理。新增远程功能时应遵循现有路径限制和哈希冲突检查。
+- `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责快照域接口。
+- `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界，共用 `RemoteOpenClawClient` 的 SSH 会话或快照传输实现；`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
+- `WebUi/app.js` 负责编排，`bridge.js`、`theme.js`、`sticker-cache.js` 各自维护桥接、主题和缓存状态；样式覆盖集中在 `styles-overrides.css`。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
+
+## P1 / P2 拆分完成情况
+
+- **P1**：远程访问已经按文件、表情包、快照三个接口拆分；记忆读写和设置校验从 `MainWindow` 移到独立服务；服务器端 Python 代理单独维护。
+- **P2**：数据模型、表情包目录解析器、`MANIFEST.md` 同步器分别成文件；Web UI 的桥接、主题、缩略图缓存和 CSS 覆盖层独立成资源；`app.js` 保留页面状态编排。
+- 新增模块通过项目默认 SDK 编译项自动纳入，不需要手动修改 `.csproj`；Web UI 资源仍由 `WebUi\**\*` 自动复制。
 
 ## 运行与构建
 
@@ -129,7 +155,7 @@ dotnet build .\OpenClawDebugger.csproj
 
 ## 当前状态与交接提示
 
-- 最近一次已完成构建：`PauseProgress` 配置输出到 `bin\PauseProgress\net10.0-windows`，构建成功，0 个警告、0 个错误；本地 JavaScript 语法检查和远程 Python 协议模拟通过。没有执行真实服务器整机备份或恢复测试。
-- 桌面快捷方式 `OpenClaw-Debugger.lnk` 已指向 `bin\PauseProgress\net10.0-windows\OpenClawDebugger.exe`。已运行的旧窗口不会热更新；关闭后从桌面快捷方式重新启动即可加载新版。
+- 最近一次已完成构建：`P2Final4` 配置输出到 `bin\P2Final4\net10.0-windows`，构建成功，0 个警告、0 个错误；本地 JavaScript 语法检查和工作树差异检查已执行。没有执行真实服务器整机备份或恢复测试。
+- 桌面快捷方式仍按本机发布目录配置；构建输出切换后请从对应发布目录重新启动。已运行的旧窗口不会热更新；关闭后从桌面快捷方式重新启动即可加载新版。
 - 仓库目标目录是 `Openclaw\OpenClaw-Debugger`。此前项目从 Napcat 工作区迁移到 Openclaw；修改前应先核对当前实际工作目录，避免改错同名目录。
 - 新对话开始时先读本 README、`git status` 和相关源码，再确认用户当前要改的功能。不要假设工作树干净，也不要把私密目录复制进仓库。

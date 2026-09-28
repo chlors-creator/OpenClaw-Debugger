@@ -21,7 +21,8 @@ public sealed class StickerService : IDisposable
         PropertyNameCaseInsensitive = true
     };
 
-    private readonly RemoteOpenClawClient _remote;
+    private readonly IRemoteFileClient _filesRemote;
+    private readonly IRemoteStickerClient _stickersRemote;
     private readonly StickerThumbnailCache _thumbnailCache;
     private readonly StickerUploadService _uploads;
     private readonly Func<ConnectionSettings> _connection;
@@ -40,7 +41,8 @@ public sealed class StickerService : IDisposable
     private ParsedStickerCatalog? _catalog;
 
     public StickerService(
-        RemoteOpenClawClient remote,
+        IRemoteFileClient filesRemote,
+        IRemoteStickerClient stickersRemote,
         StickerThumbnailCache thumbnailCache,
         StickerUploadService uploads,
         Func<ConnectionSettings> connection,
@@ -51,7 +53,8 @@ public sealed class StickerService : IDisposable
         Action<bool> setConnected,
         Action<bool> setBusy)
     {
-        _remote = remote;
+        _filesRemote = filesRemote;
+        _stickersRemote = stickersRemote;
         _thumbnailCache = thumbnailCache;
         _uploads = uploads;
         _connection = connection;
@@ -84,8 +87,8 @@ public sealed class StickerService : IDisposable
         {
             try
             {
-                var catTask = _remote.ReadAsync(_connection(), _catalogFile);
-                var manifestTask = _remote.ReadAsync(_connection(), _manifestFile);
+                var catTask = _filesRemote.ReadAsync(_connection(), _catalogFile);
+                var manifestTask = _filesRemote.ReadAsync(_connection(), _manifestFile);
                 await Task.WhenAll(catTask, manifestTask);
                 _catalogContent = catTask.Result;
                 _manifestContent = manifestTask.Result;
@@ -116,7 +119,7 @@ public sealed class StickerService : IDisposable
         EnsureConnected();
         var path = payload.GetProperty("path").GetString() ?? "";
         var file = FindImage(path);
-        var content = await _remote.ReadAsync(_connection(), file);
+        var content = await _filesRemote.ReadAsync(_connection(), file);
         if (content.Binary is null) throw new InvalidDataException("服务器返回的图片数据为空。");
         var mime = Path.GetExtension(file.RelativePath).ToLowerInvariant() switch
         {
@@ -132,7 +135,7 @@ public sealed class StickerService : IDisposable
         EnsureConnected();
         var path = payload.GetProperty("path").GetString() ?? "";
         var file = FindImage(path);
-        return await _thumbnailCache.ReadAsync(_remote, _connection(), file);
+        return await _thumbnailCache.ReadAsync(_filesRemote, _connection(), file);
     }
 
     public object PreviewRows(JsonElement payload)
@@ -234,8 +237,8 @@ public sealed class StickerService : IDisposable
         _setBusy(true);
         try
         {
-            var catTask = _remote.ReadAsync(_connection(), _catalogFile);
-            var manifestTask = _remote.ReadAsync(_connection(), _manifestFile);
+            var catTask = _filesRemote.ReadAsync(_connection(), _catalogFile);
+            var manifestTask = _filesRemote.ReadAsync(_connection(), _manifestFile);
             await Task.WhenAll(catTask, manifestTask);
             var latestCatalog = catTask.Result;
             var latestManifest = manifestTask.Result;
@@ -254,7 +257,7 @@ public sealed class StickerService : IDisposable
                 await snapshots.SaveAsync("stickers", "MANIFEST.md", oldManifest.RawBytes, oldManifest.Sha256);
                 snapshotCount++;
             }
-            var pair = await _remote.WriteStickerPairAsync(
+            var pair = await _stickersRemote.WriteStickerPairAsync(
                 _connection(), updatedCatalog, oldCatalog.Sha256, updatedManifest, oldManifest.Sha256);
             var catalogBytes = new UTF8Encoding(false).GetBytes(updatedCatalog);
             var manifestBytes = new UTF8Encoding(false).GetBytes(updatedManifest);
@@ -351,8 +354,8 @@ public sealed class StickerService : IDisposable
         _setBusy(true);
         try
         {
-            var currentImage = await _remote.ReadAsync(_connection(), oldFile);
-            var moved = await _remote.RenameStickerAsync(_connection(), oldName, newName, currentImage.Sha256);
+            var currentImage = await _filesRemote.ReadAsync(_connection(), oldFile);
+            var moved = await _stickersRemote.RenameStickerAsync(_connection(), oldName, newName, currentImage.Sha256);
             _files = plannedFiles.Select(file => file.Root == "stickers" && file.RelativePath == newName
                 ? new RemoteFile
                 {
@@ -366,7 +369,7 @@ public sealed class StickerService : IDisposable
             {
                 try
                 {
-                    await _remote.RenameStickerAsync(_connection(), newName, oldName, moved.Sha256);
+                    await _stickersRemote.RenameStickerAsync(_connection(), newName, oldName, moved.Sha256);
                     _files = _files.Select(file => file.Root == "stickers" && file.RelativePath == newName
                         ? new RemoteFile
                         {
@@ -459,7 +462,7 @@ public sealed class StickerService : IDisposable
         try
         {
             RemoteStickerUploadResult uploaded;
-            try { uploaded = await _remote.UploadStickerAsync(_connection(), session.FileName, session.Content, session.Size); }
+            try { uploaded = await _stickersRemote.UploadStickerAsync(_connection(), session.FileName, session.Content, session.Size); }
             catch { RestoreCatalog(); throw; }
 
             _files = _files.Append(new RemoteFile

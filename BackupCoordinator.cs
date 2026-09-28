@@ -4,7 +4,7 @@ public sealed record BackupControlResult(bool Paused = false, bool Cancelling = 
 
 public sealed class BackupCoordinator : IDisposable
 {
-    private readonly RemoteOpenClawClient _remote;
+    private readonly IRemoteSnapshotClient _remote;
     private readonly string _backupDirectory;
     private readonly Func<bool> _isBusy;
     private readonly Action<bool> _setBusy;
@@ -14,7 +14,7 @@ public sealed class BackupCoordinator : IDisposable
     private ServerSnapshotProgress? _lastProgress;
 
     public BackupCoordinator(
-        RemoteOpenClawClient remote,
+        IRemoteSnapshotClient remote,
         string backupDirectory,
         Func<bool> isBusy,
         Action<bool> setBusy,

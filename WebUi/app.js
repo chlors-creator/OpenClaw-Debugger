@@ -2,21 +2,12 @@
   'use strict';
   const $ = (selector, root) => (root || document).querySelector(selector);
   const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
-  const pending = new Map();
-  let requestId = 0;
+  let bridge = null;
   let toastTimer = 0;
   let dirtySyncTimer = 0;
   let uploadInProgress = false;
   let renameInProgress = false;
   let stickerPreviewLoading = false;
-  const stickerImageCache = new Map();
-  const stickerImageReads = new Map();
-  const stickerCacheLimit = 96 * 1024 * 1024;
-  let stickerCacheBytes = 0;
-  const stickerThumbnailCache = new Map();
-  const stickerThumbnailReads = new Map();
-  const stickerThumbnailCacheLimit = 16 * 1024 * 1024;
-  let stickerThumbnailCacheBytes = 0;
   let stickerThumbnailObserver = null;
   let currentTab = 'overview';
   let settings = { host: '106.14.173.90', username: 'admin', port: 22, workspacePath: '/home/admin/.openclaw/workspace', stickersPath: '/home/admin/.openclaw/workspace/stickers' };
@@ -29,62 +20,12 @@
   let stickerEditingEnabled = false;
   let originalCatalog = '';
   let originalManifest = '';
-  let selectedTheme = 'Atri';
   let dirtyMemory = false;
   let dirtyStickers = false;
   let dirtyRaw = false;
-  let blurValue = 2;
-  let washValue = 25;
-  let imageValue = 90;
-  const DEFAULT_PALETTES = {
-    Atri: { canvas:'#0a1415', surface:'#0f1d1b', ink:'#eef6f2', muted:'#a9bcb4', subtle:'#789087', accent:'#58d7c0', highlight:'#a5e8d4', buttonInk:'#102522', border:'#bee1d0', borderStrong:'#bee1d0', warm:'#efbd75', danger:'#ff8a83', wash:'#f5f9f4', memory:'#7ce0dd', sticker:'#ffa2a4', snapshot:'#f1c777' },
-    Luoxi: { canvas:'#1b1219', surface:'#281b24', ink:'#fff2f1', muted:'#d3b9bd', subtle:'#a28189', accent:'#ed8194', highlight:'#f6bdc3', buttonInk:'#311d24', border:'#f4cccc', borderStrong:'#f7c8cc', warm:'#f0ad67', danger:'#ff858c', wash:'#fff4ed', memory:'#89d4ce', sticker:'#ff9aab', snapshot:'#f0c477' },
-    Light: { canvas:'#eef3f8', surface:'#fbfdff', ink:'#1e2b36', muted:'#566779', subtle:'#758697', accent:'#397cc8', highlight:'#83afe4', buttonInk:'#ffffff', border:'#455e7a', borderStrong:'#397cc8', warm:'#a46b18', danger:'#bf443f', wash:'#f2f7fc', memory:'#327f8c', sticker:'#bd5969', snapshot:'#a46b18' }
-  };
-  const COLOR_FIELDS = [
-    { key:'canvas', css:'--palette-canvas', label:'界面底色' }, { key:'surface', css:'--palette-surface', label:'卡片与面板' },
-    { key:'ink', css:'--palette-ink', label:'主要文字' }, { key:'muted', css:'--palette-muted', label:'次级文字' },
-    { key:'subtle', css:'--palette-subtle', label:'弱化文字' }, { key:'accent', css:'--palette-accent', label:'主强调色' },
-    { key:'highlight', css:'--palette-highlight', label:'辅助强调色' }, { key:'buttonInk', css:'--palette-button-ink', label:'主按钮文字' },
-    { key:'border', css:'--palette-border', label:'边框颜色' }, { key:'borderStrong', css:'--palette-border-strong', label:'高亮边框' },
-    { key:'warm', css:'--palette-warm', label:'提示与暖色' }, { key:'danger', css:'--palette-danger', label:'错误与危险' },
-    { key:'wash', css:'--palette-wash', label:'背景泛白颜色' }, { key:'memory', css:'--palette-memory', label:'记忆图标色' },
-    { key:'sticker', css:'--palette-sticker', label:'表情包图标色' }, { key:'snapshot', css:'--palette-snapshot', label:'备份图标色' }
-  ];
-  let currentPalette = Object.assign({}, DEFAULT_PALETTES.Atri);
-
   function bridgeCall(command, payload) {
-    return new Promise((resolve, reject) => {
-      if (!window.chrome || !window.chrome.webview) return reject(new Error('本地安全桥接不可用，请从桌面应用启动。'));
-      const id = String(++requestId);
-      pending.set(id, { resolve, reject });
-      window.chrome.webview.postMessage({ id: id, command: command, payload: payload || {} });
-      const timeoutMs = command === 'backup' ? 200 * 60 * 60 * 1000 : 300000;
-      window.setTimeout(() => {
-        if (!pending.has(id)) return;
-        pending.delete(id);
-        reject(new Error('操作等待超时，请检查连接后重试。'));
-      }, timeoutMs);
-    });
-  }
-
-  function onBridgeMessage(event) {
-    const message = event.data || {};
-    if (message.type === 'progress') {
-      if (message.command === 'busy') setBusy(Boolean(message.data && message.data.busy));
-      if (message.command === 'backup') {
-        const progress = message.data || {};
-        if (progress.phase === 'paused') backupPaused = true;
-        renderBackupProgress(progress);
-        syncBackupButton();
-      }
-      return;
-    }
-    if (!message.id || !pending.has(String(message.id))) return;
-    const operation = pending.get(String(message.id));
-    pending.delete(String(message.id));
-    if (message.ok) operation.resolve(message.data);
-    else operation.reject(new Error(message.error || '操作失败。'));
+    if (!bridge) return Promise.reject(new Error('本地安全桥接尚未初始化。'));
+    return bridge.call(command, payload);
   }
 
   function syncRenameButton() {
@@ -342,82 +283,14 @@
     $('#targetSummary').textContent = (settings.username || 'admin') + '@' + (settings.host || '106.14.173.90');
   }
 
-  function normalizeTheme(theme) {
-    return theme === 'Luoxi' || theme === '洛茜' ? 'Luoxi' : theme === 'Light' || theme === '浅色' ? 'Light' : 'Atri';
-  }
-
-  function loadThemePalette(theme) {
-    const base = Object.assign({}, DEFAULT_PALETTES[theme]);
-    try {
-      const saved = JSON.parse(localStorage.getItem('ocd-colors-' + theme) || '{}');
-      COLOR_FIELDS.forEach(field => { if (typeof saved[field.key] === 'string' && /^#[0-9a-f]{6}$/i.test(saved[field.key])) base[field.key] = saved[field.key]; });
-    } catch (_) { }
-    return base;
-  }
-
-  function applyPalette() {
-    COLOR_FIELDS.forEach(field => document.documentElement.style.setProperty(field.css, currentPalette[field.key]));
-    localStorage.setItem('ocd-colors-' + selectedTheme, JSON.stringify(currentPalette));
-    renderColorControls();
-    applyBackdrop();
-  }
-
-  function renderColorControls() {
-    const container = $('#colorControls');
-    if (!container) return;
-    container.replaceChildren();
-    COLOR_FIELDS.forEach(field => {
-      const label = document.createElement('label'); label.className = 'color-control';
-      const input = document.createElement('input'); input.type = 'color'; input.value = currentPalette[field.key]; input.setAttribute('aria-label', field.label);
-      const text = document.createElement('span');
-      const name = document.createElement('strong'); name.textContent = field.label;
-      const value = document.createElement('code'); value.textContent = currentPalette[field.key].toUpperCase();
-      input.addEventListener('input', () => {
-        currentPalette[field.key] = input.value.toLowerCase(); value.textContent = currentPalette[field.key].toUpperCase();
-        document.documentElement.style.setProperty(field.css, currentPalette[field.key]);
-        localStorage.setItem('ocd-colors-' + selectedTheme, JSON.stringify(currentPalette));
-        if (field.key === 'wash') applyBackdrop();
-      });
-      text.append(name, value); label.append(input, text); container.append(label);
-    });
-  }
-
-  function applyTheme(theme) {
-    selectedTheme = normalizeTheme(theme);
-    document.body.classList.toggle('theme-light', selectedTheme === 'Light');
-    document.body.classList.toggle('theme-luoxi', selectedTheme === 'Luoxi');
-    const image = selectedTheme === 'Atri' ? "url('assets/Atri.jpg')" : selectedTheme === 'Luoxi' ? "url('assets/Luoxi.jpg')" : 'none';
-    document.documentElement.style.setProperty('--theme-image', image);
-    currentPalette = loadThemePalette(selectedTheme);
-    applyPalette();
-    $$('.theme-option').forEach(button => button.classList.toggle('active', button.dataset.theme === selectedTheme));
-  }
-  function hexToRgba(hex, opacity) {
-    const value = String(hex || '#f5f9f4').replace('#', '');
-    const safe = /^[0-9a-f]{6}$/i.test(value) ? value : 'f5f9f4';
-    const red = parseInt(safe.slice(0, 2), 16), green = parseInt(safe.slice(2, 4), 16), blue = parseInt(safe.slice(4, 6), 16);
-    return 'rgba(' + red + ',' + green + ',' + blue + ',' + opacity + ')';
-  }
-
-  function applyBackdrop() {
-    document.documentElement.style.setProperty('--backdrop-blur', blurValue + 'px');
-    document.documentElement.style.setProperty('--backdrop-opacity', (imageValue / 100).toFixed(2));
-    const washOpacity = (washValue / 100).toFixed(2);
-    const wash = $('.backdrop-wash');
-    wash.style.setProperty('--wash-opacity', washOpacity);
-    wash.style.backgroundColor = hexToRgba(currentPalette.wash || DEFAULT_PALETTES.Atri.wash, Number(washOpacity));
-    $('#blurOutput').value = blurValue + ' px'; $('#washOutput').value = washValue + '%'; $('#imageOutput').value = imageValue + '%';
-    $('#blurOutput').textContent = blurValue + ' px'; $('#washOutput').textContent = washValue + '%'; $('#imageOutput').textContent = imageValue + '%';
-    localStorage.setItem('ocd-backdrop', JSON.stringify({ blur: blurValue, wash: washValue, image: imageValue }));
-  }
-  async function persistTheme(theme) {
-    const normalized = theme === 'Luoxi' ? 'Luoxi' : theme === 'Light' ? 'Light' : 'Atri';
-    applyTheme(normalized);
-    try {
-      await bridgeCall('setTheme', { theme: normalized });
-      showToast('主题已应用并保存。');
-    } catch (error) { reportError(error); }
-  }
+  let themeController = null;
+  function applyTheme(theme) { return themeController && themeController.applyTheme(theme); }
+  function persistTheme(theme) { return themeController && themeController.persistTheme(theme); }
+  function initializeBackdrop() { return themeController && themeController.initializeBackdrop(); }
+  function applyBackdrop() { return themeController && themeController.applyBackdrop(); }
+  function resetThemePalette() { return themeController && themeController.resetPalette(); }
+  function setBackdropValue(kind, value) { return themeController && themeController.setBackdropValue(kind, value); }
+  function resetBackdrop() { return themeController && themeController.resetBackdrop(); }
 
   function renderMemoryList() {
     const list = $('#memoryList');
@@ -528,94 +401,12 @@
   }
   function fileIsGif(path) { return path.toLowerCase().endsWith('.gif'); }
 
-  function rememberStickerImage(path, preview) {
-    const size = Number(preview.size) || Math.ceil((preview.dataUrl || '').length * 0.75);
-    const previous = stickerImageCache.get(path);
-    if (previous) stickerCacheBytes -= previous.size;
-    if (size > stickerCacheLimit) { stickerImageCache.delete(path); return preview; }
-    stickerImageCache.delete(path);
-    stickerImageCache.set(path, { dataUrl: preview.dataUrl, size: size });
-    stickerCacheBytes += size;
-    while (stickerCacheBytes > stickerCacheLimit && stickerImageCache.size) {
-      const oldestKey = stickerImageCache.keys().next().value;
-      const oldest = stickerImageCache.get(oldestKey);
-      stickerCacheBytes -= oldest.size;
-      stickerImageCache.delete(oldestKey);
-    }
-    return preview;
-  }
-
-  function clearStickerImageCache() {
-    stickerImageCache.clear(); stickerImageReads.clear(); stickerCacheBytes = 0;
-    stickerThumbnailCache.clear(); stickerThumbnailReads.clear(); stickerThumbnailCacheBytes = 0;
-  }
-
-  function moveStickerImageCache(oldPath, newPath) {
-    const cached = stickerImageCache.get(oldPath);
-    if (cached) {
-      stickerImageCache.delete(oldPath);
-      stickerImageCache.set(newPath, cached);
-    }
-    const thumbnail = stickerThumbnailCache.get(oldPath);
-    if (thumbnail) {
-      stickerThumbnailCache.delete(oldPath);
-      stickerThumbnailCache.set(newPath, thumbnail);
-    }
-  }
-
-  function rememberStickerThumbnail(path, preview) {
-    const size = Number(preview.size) || Math.ceil((preview.dataUrl || '').length * 0.75);
-    const previous = stickerThumbnailCache.get(path);
-    if (previous) stickerThumbnailCacheBytes -= previous.size;
-    if (size > stickerThumbnailCacheLimit) { stickerThumbnailCache.delete(path); return preview; }
-    stickerThumbnailCache.delete(path);
-    stickerThumbnailCache.set(path, { dataUrl: preview.dataUrl, size: size, originalSize: preview.originalSize });
-    stickerThumbnailCacheBytes += size;
-    while (stickerThumbnailCacheBytes > stickerThumbnailCacheLimit && stickerThumbnailCache.size) {
-      const oldestKey = stickerThumbnailCache.keys().next().value;
-      const oldest = stickerThumbnailCache.get(oldestKey);
-      stickerThumbnailCacheBytes -= oldest.size;
-      stickerThumbnailCache.delete(oldestKey);
-    }
-    return preview;
-  }
-
-  function loadStickerImage(path) {
-    const cached = stickerImageCache.get(path);
-    if (cached) {
-      stickerImageCache.delete(path); stickerImageCache.set(path, cached);
-      return Promise.resolve(cached);
-    }
-    if (stickerImageReads.has(path)) return stickerImageReads.get(path);
-    const read = bridgeCall('readSticker', { path: path }).then(preview => rememberStickerImage(path, preview))
-      .finally(() => stickerImageReads.delete(path));
-    stickerImageReads.set(path, read);
-    return read;
-  }
-
-  function loadStickerThumbnailData(path) {
-    const cached = stickerThumbnailCache.get(path);
-    if (cached) {
-      stickerThumbnailCache.delete(path); stickerThumbnailCache.set(path, cached);
-      return Promise.resolve(cached);
-    }
-    if (stickerThumbnailReads.has(path)) return stickerThumbnailReads.get(path);
-    const read = bridgeCall('readStickerThumbnail', { path: path }).then(preview => rememberStickerThumbnail(path, preview))
-      .finally(() => stickerThumbnailReads.delete(path));
-    stickerThumbnailReads.set(path, read);
-    return read;
-  }
-
-  async function loadStickerThumbnail(row, image) {
-    try {
-      const preview = await loadStickerThumbnailData(row.imagePath);
-      if (!image.isConnected) return;
-      image.src = preview.dataUrl;
-      image.parentElement.classList.add('has-image');
-    } catch (_) {
-      if (image.isConnected) image.parentElement.classList.add('thumbnail-unavailable');
-    }
-  }
+  let stickerCacheController = null;
+  function clearStickerImageCache() { return stickerCacheController && stickerCacheController.clearStickerImageCache(); }
+  function moveStickerImageCache(oldPath, newPath) { return stickerCacheController && stickerCacheController.moveStickerImageCache(oldPath, newPath); }
+  function loadStickerImage(path) { return stickerCacheController ? stickerCacheController.loadStickerImage(path) : Promise.reject(new Error('图片缓存尚未初始化。')); }
+  function loadStickerThumbnailData(path) { return stickerCacheController ? stickerCacheController.loadStickerThumbnailData(path) : Promise.reject(new Error('缩略图缓存尚未初始化。')); }
+  function loadStickerThumbnail(row, image) { return stickerCacheController ? stickerCacheController.loadStickerThumbnail(row, image) : Promise.resolve(); }
 
   async function selectSticker(row) {
     currentSticker = row.imagePath;
@@ -977,17 +768,6 @@
     } catch (error) { reportError(error); }
   }
 
-  function initializeBackdrop() {
-    try {
-      const saved = JSON.parse(localStorage.getItem('ocd-backdrop') || '{}');
-      blurValue = Number.isFinite(saved.blur) ? saved.blur : 2;
-      washValue = Number.isFinite(saved.wash) ? saved.wash : 25;
-      imageValue = Number.isFinite(saved.image) ? saved.image : 90;
-    } catch (_) { blurValue = 2; washValue = 25; imageValue = 90; }
-    $('#blurRange').value = blurValue; $('#washRange').value = washValue; $('#imageRange').value = imageValue;
-    applyBackdrop();
-  }
-
   function wireEvents() {
     $$('.nav-tab').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
     $$('[data-go]').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.go)));
@@ -1018,8 +798,7 @@
     $('#saveStickerButton').addEventListener('click', saveStickerRows);
     $('#rawStickerButton').addEventListener('click', openRawEditor);
     $('#resetColors').addEventListener('click', () => {
-      localStorage.removeItem('ocd-colors-' + selectedTheme);
-      applyTheme(selectedTheme);
+      resetThemePalette();
       showToast('已恢复此主题的默认颜色。');
     });
     const uploadZone = $('#uploadDropzone');
@@ -1059,10 +838,10 @@
     $('#rawManifest').addEventListener('input', () => { dirtyRaw = $('#rawCatalog').value !== originalCatalog || $('#rawManifest').value !== originalManifest; setDirtyState(); });
     $('#rawSaveButton').addEventListener('click', event => { event.preventDefault(); saveRawEditor(); });
     $('#rawDialog').addEventListener('close', () => { if ($('#rawDialog').returnValue !== 'saved') { dirtyRaw = false; setDirtyState(); } });
-    $('#blurRange').addEventListener('input', event => { blurValue = Number(event.target.value); applyBackdrop(); });
-    $('#washRange').addEventListener('input', event => { washValue = Number(event.target.value); applyBackdrop(); });
-    $('#imageRange').addEventListener('input', event => { imageValue = Number(event.target.value); applyBackdrop(); });
-    $('#resetBackdrop').addEventListener('click', () => { blurValue = 2; washValue = 25; imageValue = 90; $('#blurRange').value = 2; $('#washRange').value = 25; $('#imageRange').value = 90; applyBackdrop(); showToast('背景效果已恢复默认。'); });
+    $('#blurRange').addEventListener('input', event => setBackdropValue('blur', event.target.value));
+    $('#washRange').addEventListener('input', event => setBackdropValue('wash', event.target.value));
+    $('#imageRange').addEventListener('input', event => setBackdropValue('image', event.target.value));
+    $('#resetBackdrop').addEventListener('click', () => { resetBackdrop(); showToast('背景效果已恢复默认。'); });
     $$('.theme-option').forEach(button => button.addEventListener('click', () => persistTheme(button.dataset.theme)));
     window.addEventListener('beforeunload', event => {
       if (dirtyMemory || dirtyStickers || dirtyRaw) { event.preventDefault(); event.returnValue = ''; }
@@ -1070,7 +849,16 @@
   }
 
   async function boot() {
-    if (window.chrome && window.chrome.webview) window.chrome.webview.addEventListener('message', onBridgeMessage);
+    bridge = window.OpenClawBridge.create({
+      onBusy: busy => setBusy(busy),
+      onBackup: progress => {
+        if (progress.phase === 'paused') backupPaused = true;
+        renderBackupProgress(progress);
+        syncBackupButton();
+      }
+    });
+    themeController = window.OpenClawTheme.create({ bridgeCall, showToast, reportError });
+    stickerCacheController = window.OpenClawStickerCache.create({ bridgeCall });
     wireEvents(); initializeBackdrop();
     try {
       const state = await bridgeCall('initialize', {});

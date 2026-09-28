@@ -34,7 +34,7 @@ public sealed class StickerThumbnailCache
     }
 
     public async Task<StickerThumbnailResult> ReadAsync(
-        RemoteOpenClawClient remote,
+        IRemoteFileClient remote,
         ConnectionSettings settings,
         RemoteFile file,
         CancellationToken cancellationToken = default)
