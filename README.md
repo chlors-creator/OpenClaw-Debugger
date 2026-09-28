@@ -61,18 +61,34 @@ OpenClaw-Debugger/
 │   ├── bridge.js          # WebView 消息请求/响应和进度事件
 │   ├── theme.js           # 主题、调色板和背景调节控制器
 │   ├── sticker-cache.js    # 原图/缩略图缓存控制器
-│   └── app.js             # 页面编排、列表渲染、编辑和事件绑定
+│   ├── memory-controller.js # 记忆列表、预览和保存控制器
+│   ├── sticker-controller.js # 表情包目录、预览、标签和重命名控制器
+│   ├── upload-controller.js # 本地拖放、分块上传和目录登记控制器
+│   ├── backup-controller.js # 备份进度、暂停、继续和取消控制器
+│   ├── settings-controller.js # 连接设置表单控制器
+│   ├── app-state.js        # 跨控制器共享状态和状态适配器
+│   ├── event-bindings.js   # DOM 事件、拖放和窗口事件绑定
+│   └── app.js             # 页面编排和生命周期
 ├── App.xaml(.cs)          # WPF 应用入口
-├── MainWindow.xaml(.cs)   # WebView2 生命周期、连接流程和消息编排
+├── MainWindow.xaml(.cs)   # WebView2 生命周期、连接流程和控制器装配
+├── ConnectionCoordinator.cs # 连接生命周期、远程客户端和服务装配
 ├── BridgeDispatcher.cs    # WebView 消息解析、来源校验和命令分发
 ├── BridgeResponseWriter.cs # WebView 响应和进度事件输出
+├── BridgeCommandRouter.cs # 命令注册表和未注册命令拒绝
+├── ConnectionBridgeHandler.cs # 初始化、连接和设置命令处理器
+├── MemoryBridgeHandler.cs # 记忆命令处理器
+├── StickerBridgeHandler.cs # 表情包命令处理器
+├── BackupBridgeHandler.cs # 备份命令处理器
+├── WindowBridgeHandler.cs # 窗口和本地目录命令处理器
 ├── ConnectionSettings.cs  # SSH 和远程目录设置模型
 ├── RemoteFile.cs          # 远程清单文件模型
 ├── RemoteFileContent.cs   # 远程文件读取结果模型
 ├── StickerRow.cs          # 表情包目录行模型
 ├── UserSettings.cs        # 本机设置模型
 ├── RemoteClientInterfaces.cs # 文件、表情包和快照客户端边界
-├── RemoteOpenClawClient.cs # 复用 SSH 会话和远程代理调用原语
+├── RemoteOpenClawClient.cs # 远程领域门面和请求模型
+├── RemoteAgentSession.cs  # 可复用 SSH Python 会话和响应协议
+├── RemoteStickerStreamUploader.cs # 低内存流式图片上传
 ├── RemoteFileClient.cs    # 文件域客户端适配器
 ├── RemoteStickerClient.cs # 表情包域客户端适配器
 ├── RemoteAgentProgram.cs  # 独立维护的服务器端 Python 代理
@@ -115,12 +131,12 @@ OpenClaw-Debugger/
 
 - `WebUi/` 是 HTML UI 的唯一界面层；静态资源随构建复制。不要把远程 CDN 作为运行依赖。
 - UI 通过映射到固定来源 `https://openclaw.local` 的 WebView2 页面加载，并通过类型化消息调用宿主功能。
-- `MainWindow.xaml.cs` 只负责 WebView 生命周期、连接状态和消息编排；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件。
+- `MainWindow.xaml.cs` 只负责 WebView 生命周期、窗口关闭和控制器装配；`ConnectionCoordinator.cs` 负责连接生命周期、远程客户端和业务服务装配；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件，`BridgeCommandRouter.cs` 与各 `*BridgeHandler.cs` 负责按领域注册命令。
 - `MemoryService.cs` 负责记忆文件读取、二次哈希校验、DPAPI 回滚快照和保存；`SettingsService.cs` 负责连接设置校验及主题偏好持久化。
 - `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
 - `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责快照域接口。
-- `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界，共用 `RemoteOpenClawClient` 的 SSH 会话或快照传输实现；`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
-- `WebUi/app.js` 负责编排，`bridge.js`、`theme.js`、`sticker-cache.js` 各自维护桥接、主题和缓存状态；样式覆盖集中在 `styles-overrides.css`。
+- `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界；`RemoteOpenClawClient.cs` 只保留领域门面，`RemoteAgentSession.cs` 管理复用 SSH 会话，`RemoteStickerStreamUploader.cs` 管理低内存流式上传，`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
+- `WebUi/app.js` 只负责编排和生命周期；`app-state.js` 管理跨控制器共享状态，`event-bindings.js` 管理 DOM、拖放和窗口事件，`memory-controller.js`、`sticker-controller.js`、`upload-controller.js`、`backup-controller.js`、`settings-controller.js` 各自维护对应功能；`bridge.js`、`theme.js`、`sticker-cache.js` 维护桥接、主题和缓存状态，样式覆盖集中在 `styles-overrides.css`。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
 
@@ -129,6 +145,17 @@ OpenClaw-Debugger/
 - **P1**：远程访问已经按文件、表情包、快照三个接口拆分；记忆读写和设置校验从 `MainWindow` 移到独立服务；服务器端 Python 代理单独维护。
 - **P2**：数据模型、表情包目录解析器、`MANIFEST.md` 同步器分别成文件；Web UI 的桥接、主题、缩略图缓存和 CSS 覆盖层独立成资源；`app.js` 保留页面状态编排。
 - 新增模块通过项目默认 SDK 编译项自动纳入，不需要手动修改 `.csproj`；Web UI 资源仍由 `WebUi\**\*` 自动复制。
+
+## P3 拆分完成情况
+
+- `RemoteOpenClawClient` 已拆成远程领域门面、`RemoteAgentSession` SSH 会话层和 `RemoteStickerStreamUploader` 流式上传层；连接复用、响应解析和流式传输不再混在领域方法中。
+- `MainWindow` 的大型命令 `switch` 已替换为 `BridgeCommandRouter` 注册表，各领域命令由独立处理器负责，窗口只装配依赖并转发请求。
+- Web UI 已按功能拆成记忆、表情包、上传、备份和设置控制器；共享状态移到 `app-state.js`，DOM 事件移到 `event-bindings.js`，`app.js` 从约 875 行缩减到约 298 行，只保留跨模块编排和生命周期。
+
+## P4 拆分完成情况
+
+- `ConnectionCoordinator.cs` 接管连接扫描、远程客户端、记忆服务、表情包服务和备份服务的创建与释放；`MainWindow.xaml.cs` 不再持有远程客户端和连接扫描实现。
+- `app-state.js` 集中维护前端状态及记忆、表情包、上传、备份、设置状态适配器；`event-bindings.js` 集中维护导航、编辑器、拖放、主题和窗口事件，控制器通过显式依赖接收所需回调。
 
 ## 运行与构建
 
@@ -155,7 +182,7 @@ dotnet build .\OpenClawDebugger.csproj
 
 ## 当前状态与交接提示
 
-- 最近一次已完成构建：`P2Final4` 配置输出到 `bin\P2Final4\net10.0-windows`，构建成功，0 个警告、0 个错误；本地 JavaScript 语法检查和工作树差异检查已执行。没有执行真实服务器整机备份或恢复测试。
+- 最近一次已完成构建：`P4Split` 配置输出到 `bin\P4Split\net10.0-windows`，构建成功，0 个警告、0 个错误；所有 Web UI JavaScript 文件均通过 `node --check`，前端模块加载烟雾检查通过，并执行了工作树差异检查。没有执行真实服务器整机备份或恢复测试。
 - 桌面快捷方式仍按本机发布目录配置；构建输出切换后请从对应发布目录重新启动。已运行的旧窗口不会热更新；关闭后从桌面快捷方式重新启动即可加载新版。
 - 仓库目标目录是 `Openclaw\OpenClaw-Debugger`。此前项目从 Napcat 工作区迁移到 Openclaw；修改前应先核对当前实际工作目录，避免改错同名目录。
 - 新对话开始时先读本 README、`git status` 和相关源码，再确认用户当前要改的功能。不要假设工作树干净，也不要把私密目录复制进仓库。

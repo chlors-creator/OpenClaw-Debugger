@@ -2,7 +2,6 @@ using Microsoft.Web.WebView2.Core;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Security;
 using System.Text.Json;
 using System.Windows;
 
@@ -13,25 +12,19 @@ public partial class MainWindow : Window
     private readonly BridgeResponseWriter _bridgeResponses = new();
     private readonly SettingsService _settingsService = new();
     private BridgeDispatcher? _bridgeDispatcher;
-    private readonly RemoteOpenClawClient _remote = new();
-    private readonly RemoteFileClient _remoteFiles;
-    private readonly RemoteStickerClient _remoteStickers;
-    private readonly RemoteSnapshotClient _snapshotClient = new();
-    private MemoryService? _memory;
+    private BridgeCommandRouter? _commandRouter;
+    private readonly ConnectionCoordinator _connection;
     private UserSettings _settings = new();
-    private LocalSnapshotStore? _snapshots;
-    private StickerService? _stickers;
-    private BackupCoordinator? _backup;
-    private IReadOnlyList<RemoteFile> _files = [];
-    private bool _serverConnected;
     private bool _busy;
     private bool _hasDrafts;
     private bool _closingApproved;
 
     public MainWindow()
     {
-        _remoteFiles = new RemoteFileClient(_remote);
-        _remoteStickers = new RemoteStickerClient(_remote);
+        _connection = new ConnectionCoordinator(
+            () => _busy,
+            SetBusy,
+            (command, data) => _bridgeResponses.SendProgress(command, data));
         InitializeComponent();
     }
 
@@ -42,32 +35,8 @@ public partial class MainWindow : Window
             _settings = await SettingsRepository.LoadAsync();
             _settings.PrivateDirectory = SettingsRepository.DefaultPrivateDirectory;
             if (_settings.ThemeName is not ("Atri" or "Luoxi" or "Light")) _settings.ThemeName = "Atri";
-            _snapshots = new LocalSnapshotStore(_settings.PrivateDirectory);
-            _memory = new MemoryService(
-                _remoteFiles,
-                () => _settings.Connection,
-                () => _snapshots,
-                () => _files,
-                () => _serverConnected,
-                SetBusy);
-            _stickers = new StickerService(
-                _remoteFiles,
-                _remoteStickers,
-                new StickerThumbnailCache(_settings.PrivateDirectory),
-                new StickerUploadService(),
-                () => _settings.Connection,
-                () => _snapshots,
-                () => _settings.PrivateDirectory,
-                () => _serverConnected,
-                () => _busy,
-                value => _serverConnected = value,
-                SetBusy);
-            _backup = new BackupCoordinator(
-                _snapshotClient,
-                SettingsRepository.DefaultBackupDirectory,
-                () => _busy,
-                SetBusy,
-                (command, data) => _bridgeResponses.SendProgress(command, data));
+            _connection.Initialize(_settings);
+            _commandRouter = CreateCommandRouter();
 
             await MainWebView.EnsureCoreWebView2Async();
             var core = MainWebView.CoreWebView2;
@@ -103,119 +72,44 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<object?> DispatchAsync(string command, JsonElement payload)
+    private Task<object?> DispatchAsync(string command, JsonElement payload) =>
+        (_commandRouter ?? throw new InvalidOperationException("界面命令路由器未初始化。"))
+            .DispatchAsync(command, payload);
+
+    private BridgeCommandRouter CreateCommandRouter()
     {
-        switch (command)
-        {
-            case "initialize":
-                return new
-                {
-                    settings = _settings,
-                    privateDirectory = _settings.PrivateDirectory,
-                    backupDirectory = SettingsRepository.DefaultBackupDirectory,
-                    themes = new[] { "Atri", "洛茜", "浅色" },
-                    connected = _serverConnected
-                };
-            case "saveSettings":
-                await _settingsService.SaveConnectionAsync(payload, _settings);
-                return new { settings = _settings, privateDirectory = _settings.PrivateDirectory, backupDirectory = SettingsRepository.DefaultBackupDirectory };
-            case "setTheme":
-                var theme = await _settingsService.SetThemeAsync(payload, _settings);
-                return new { theme };
-            case "connect":
-                return await ConnectAsync();
-            case "readMemory":
-                return await (_memory ?? throw new InvalidOperationException("记忆服务未初始化。")).ReadAsync(payload);
-            case "saveMemory":
-                return await (_memory ?? throw new InvalidOperationException("记忆服务未初始化。")).SaveAsync(payload);
-            case "readSticker":
-                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).ReadAsync(payload);
-            case "readStickerThumbnail":
-                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).ReadThumbnailAsync(payload);
-            case "previewStickerRows":
-                return (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).PreviewRows(payload);
-            case "saveStickerRows":
-                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).SaveRowsAsync(payload);
-            case "saveStickerRaw":
-                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).SaveRawAsync(payload);
-            case "beginStickerUpload":
-                return (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).BeginUpload(payload);
-            case "appendStickerUpload":
-                return (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).AppendUpload(payload);
-            case "commitStickerUpload":
-                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).CommitUploadAsync(payload);
-            case "cancelStickerUpload":
-                (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).CancelUpload(payload);
-                return new { cancelled = true };
-            case "renameSticker":
-                return await (_stickers ?? throw new InvalidOperationException("表情包服务未初始化。")).RenameAsync(payload);
-            case "backup":
-                var backup = _backup ?? throw new InvalidOperationException("备份服务未初始化。");
-                var backupResult = await backup.StartAsync(_settings.Connection);
-                return new { directory = backupResult.Directory, archivePath = backupResult.ArchivePath, archiveBytes = backupResult.ArchiveBytes, sha256 = backupResult.Sha256 };
-            case "toggleBackupPause":
-                return (_backup ?? throw new InvalidOperationException("备份服务未初始化。")).TogglePause();
-            case "cancelBackup":
-                return (_backup ?? throw new InvalidOperationException("备份服务未初始化。")).Cancel();
-            case "openBackupFolder":
-                Directory.CreateDirectory(SettingsRepository.DefaultBackupDirectory);
-                Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { SettingsRepository.DefaultBackupDirectory } });
-                return new { opened = true };
-            case "openPrivateFolder":
-                Directory.CreateDirectory(_settings.PrivateDirectory);
-                Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { _settings.PrivateDirectory } });
-                return new { opened = true };
-            case "draftState":
-                _hasDrafts = payload.TryGetProperty("dirty", out var dirty) && dirty.GetBoolean();
-                return new { accepted = true };
-            case "close":
+        var router = new BridgeCommandRouter();
+        new ConnectionBridgeHandler(
+            _settingsService,
+            () => _settings,
+            () => _connection.IsConnected,
+            ConnectAsync).Register(router);
+        new MemoryBridgeHandler(() => _connection.Memory).Register(router);
+        new StickerBridgeHandler(() => _connection.Stickers).Register(router);
+        new BackupBridgeHandler(() => _connection.Backup, () => _settings.Connection, OpenFolder).Register(router);
+        new WindowBridgeHandler(
+            () => _settings.PrivateDirectory,
+            dirty => _hasDrafts = dirty,
+            () =>
+            {
                 _closingApproved = true;
                 Close();
-                return new { closing = true };
-            default:
-                throw new InvalidDataException("不支持的界面操作：" + command);
-        }
+            },
+            OpenFolder).Register(router);
+        return router;
     }
 
-    private async Task<object> ConnectAsync()
+    private static void OpenFolder(string path)
     {
-        if (_busy) throw new InvalidOperationException("当前有操作正在进行。");
-        SetBusy(true);
-        try
+        Directory.CreateDirectory(path);
+        Process.Start(new ProcessStartInfo("explorer.exe")
         {
-            await SettingsRepository.SaveAsync(_settings);
-            _files = await _remoteFiles.ConnectAndListAsync(_settings.Connection);
-            _serverConnected = true;
-            _memory?.Reset();
-            var stickerService = _stickers ?? throw new InvalidOperationException("表情包服务未初始化。");
-            var stickerLoad = await stickerService.LoadAsync(_files);
-            var memories = _files.Where(x => x.Root == "workspace" && !x.IsImage && x.Editable)
-                .OrderBy(x => x.RelativePath.StartsWith("memory/", StringComparison.Ordinal) ? 1 : 0)
-                .ThenBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase).ToList();
-            var imagesCount = _files.Count(x => x.Root == "stickers" && x.IsImage);
-            return new
-            {
-                connected = true,
-                connectionStatus = "已连接 · " + memories.Count + " 个文档 · " + imagesCount + " 张图片",
-                memoryFiles = memories,
-                memoryCount = memories.Count,
-                stickerFiles = stickerLoad.StickerFiles,
-                stickerCount = stickerLoad.StickerCount,
-                stickerEditingEnabled = stickerLoad.StickerEditingEnabled,
-                catalogText = stickerLoad.CatalogText,
-                manifestText = stickerLoad.ManifestText,
-                stickerStatus = stickerLoad.StickerStatus,
-                workspacePath = _settings.Connection.WorkspacePath,
-                stickersPath = _settings.Connection.StickersPath
-            };
-        }
-        catch
-        {
-            _serverConnected = false;
-            throw;
-        }
-        finally { SetBusy(false); }
+            UseShellExecute = true,
+            ArgumentList = { path }
+        });
     }
+
+    private Task<object> ConnectAsync() => _connection.ConnectAsync(_settings);
 
     private void SetBusy(bool busy)
     {
@@ -231,10 +125,7 @@ public partial class MainWindow : Window
             if (answer != MessageBoxResult.Yes) e.Cancel = true;
         }
         if (e.Cancel) return;
-        _backup?.Dispose();
-        _stickers?.Dispose();
-        _snapshotClient.Dispose();
-        _remote.Dispose();
+        _connection.Dispose();
     }
 
 }
