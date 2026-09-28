@@ -13,13 +13,15 @@ public sealed class BridgeResponseWriter
     public void Respond(string id, bool ok, object? data, string? error)
     {
         if (_webView is null) return;
-        _webView.PostWebMessageAsJson(JsonSerializer.Serialize(new BridgeResponse(id, ok, data, error), JsonOptions));
+        try { _webView.PostWebMessageAsJson(JsonSerializer.Serialize(new BridgeResponse(id, ok, data, error), JsonOptions)); }
+        catch (InvalidOperationException) { }
     }
 
     public void SendProgress(string command, object data)
     {
         if (_webView is null) return;
-        _webView.PostWebMessageAsJson(JsonSerializer.Serialize(new BridgeEvent("progress", command, data), JsonOptions));
+        try { _webView.PostWebMessageAsJson(JsonSerializer.Serialize(new BridgeEvent("progress", command, data), JsonOptions)); }
+        catch (InvalidOperationException) { }
     }
 
     private sealed record BridgeResponse(string Id, bool Ok, object? Data, string? Error);

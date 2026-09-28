@@ -11,16 +11,16 @@ public sealed class StickerBridgeHandler
 
     public void Register(BridgeCommandRouter router)
     {
-        router.Map("readSticker", async payload => await Require().ReadAsync(payload));
-        router.Map("readStickerThumbnail", async payload => await Require().ReadThumbnailAsync(payload));
+        router.Map("readSticker", async (payload, cancellationToken) => await Require().ReadAsync(payload, cancellationToken));
+        router.Map("readStickerThumbnail", async (payload, cancellationToken) => await Require().ReadThumbnailAsync(payload, cancellationToken));
         router.Map("previewStickerRows", payload => Task.FromResult<object?>(Require().PreviewRows(payload)));
-        router.Map("saveStickerRows", async payload => await Require().SaveRowsAsync(payload));
-        router.Map("saveStickerRaw", async payload => await Require().SaveRawAsync(payload));
+        router.Map("saveStickerRows", async (payload, cancellationToken) => await Require().SaveRowsAsync(payload, cancellationToken));
+        router.Map("saveStickerRaw", async (payload, cancellationToken) => await Require().SaveRawAsync(payload, cancellationToken));
         router.Map("beginStickerUpload", payload => Task.FromResult<object?>(Require().BeginUpload(payload)));
         router.Map("appendStickerUpload", payload => Task.FromResult<object?>(Require().AppendUpload(payload)));
-        router.Map("commitStickerUpload", async payload => await Require().CommitUploadAsync(payload));
+        router.Map("commitStickerUpload", async (payload, cancellationToken) => await Require().CommitUploadAsync(payload, cancellationToken));
         router.Map("cancelStickerUpload", payload => CancelUpload(payload));
-        router.Map("renameSticker", async payload => await Require().RenameAsync(payload));
+        router.Map("renameSticker", async (payload, cancellationToken) => await Require().RenameAsync(payload, cancellationToken));
     }
 
     private Task<object?> CancelUpload(JsonElement payload)

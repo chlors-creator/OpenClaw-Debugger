@@ -33,12 +33,12 @@ public sealed class MemoryService
 
     public void Reset() => _loaded.Clear();
 
-    public async Task<object> ReadAsync(JsonElement payload)
+    public async Task<object> ReadAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         var path = payload.GetProperty("path").GetString() ?? "";
         var file = FindFile(path);
-        var content = await _remote.ReadAsync(_connection(), file);
+        var content = await _remote.ReadAsync(_connection(), file, cancellationToken);
         _loaded[file.Key] = content;
         return new
         {
@@ -50,7 +50,7 @@ public sealed class MemoryService
         };
     }
 
-    public async Task<object> SaveAsync(JsonElement payload)
+    public async Task<object> SaveAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         var snapshotStore = _snapshots() ?? throw new InvalidOperationException("本机加密回滚存储未初始化。");
@@ -65,11 +65,11 @@ public sealed class MemoryService
         _setBusy(true);
         try
         {
-            var latest = await _remote.ReadAsync(_connection(), file);
+            var latest = await _remote.ReadAsync(_connection(), file, cancellationToken);
             if (!latest.Sha256.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
                 throw new RemoteConflictException("服务器文件在读取后发生了变化。没有覆盖它；请重新读取文件并合并修改。");
             var snapshot = await snapshotStore.SaveAsync(latest.Root, latest.RelativePath, latest.RawBytes, latest.Sha256);
-            var newHash = await _remote.WriteAsync(_connection(), file, text, latest.Sha256);
+            var newHash = await _remote.WriteAsync(_connection(), file, text, latest.Sha256, cancellationToken);
             var bytes = new UTF8Encoding(false).GetBytes(text);
             _loaded[file.Key] = latest with
             {

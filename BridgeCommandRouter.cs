@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace OpenClawDebugger;
 
-public delegate Task<object?> BridgeCommandHandler(JsonElement payload);
+public delegate Task<object?> BridgeCommandHandler(JsonElement payload, CancellationToken cancellationToken);
 
 /// <summary>WebView 命令注册表。命令处理器按功能模块注册，宿主窗口不再维护大型 switch。</summary>
 public sealed class BridgeCommandRouter
@@ -18,11 +18,14 @@ public sealed class BridgeCommandRouter
         return this;
     }
 
-    public Task<object?> DispatchAsync(string command, JsonElement payload)
+    public BridgeCommandRouter Map(string command, Func<JsonElement, Task<object?>> handler) =>
+        Map(command, (payload, _) => handler(payload));
+
+    public Task<object?> DispatchAsync(string command, JsonElement payload, CancellationToken cancellationToken = default)
     {
         if (!_handlers.TryGetValue(command, out var handler))
             throw new InvalidDataException("不支持的界面操作：" + command);
-        return handler(payload);
+        return handler(payload, cancellationToken);
     }
 
     public IReadOnlyCollection<string> Commands => _handlers.Keys.ToArray();

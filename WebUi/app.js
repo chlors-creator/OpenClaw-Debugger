@@ -3,9 +3,9 @@
   const $ = (selector, root) => (root || document).querySelector(selector);
   const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
   const appState = window.OpenClawAppState.create();
-  function bridgeCall(command, payload) {
+  function bridgeCall(command, payload, options) {
     if (!appState.bridge) return Promise.reject(new Error('本地安全桥接尚未初始化。'));
-    return appState.bridge.call(command, payload);
+    return appState.bridge.call(command, payload, options);
   }
 
   function syncRenameButton() {
@@ -156,7 +156,7 @@
 
   function clearStickerImageCache() { return appState.stickerCacheController && appState.stickerCacheController.clearStickerImageCache(); }
   function moveStickerImageCache(oldPath, newPath) { return appState.stickerCacheController && appState.stickerCacheController.moveStickerImageCache(oldPath, newPath); }
-  function loadStickerImage(path) { return appState.stickerCacheController ? appState.stickerCacheController.loadStickerImage(path) : Promise.reject(new Error('图片缓存尚未初始化。')); }
+  function loadStickerImage(path, options) { return appState.stickerCacheController ? appState.stickerCacheController.loadStickerImage(path, options) : Promise.reject(new Error('图片缓存尚未初始化。')); }
   function loadStickerThumbnailData(path) { return appState.stickerCacheController ? appState.stickerCacheController.loadStickerThumbnailData(path) : Promise.reject(new Error('缩略图缓存尚未初始化。')); }
   function loadStickerThumbnail(row, image) { return appState.stickerCacheController ? appState.stickerCacheController.loadStickerThumbnail(row, image) : Promise.resolve(); }
 
@@ -170,16 +170,27 @@
   }
 
   async function connectServer() {
+    if (appState.connecting) return;
     if (appState.dirtyMemory || appState.dirtyStickers || appState.dirtyRaw) {
       showToast('请先保存或放弃未完成的修改，再重新扫描。', true);
       return;
     }
+    if (appState.backupActive || appState.uploadInProgress || appState.renameInProgress) {
+      showToast('当前有远程操作正在进行，请完成或取消后再连接。', true);
+      return;
+    }
+    const generation = ++appState.connection.connectGeneration;
+    const controller = new AbortController();
+    appState.connection.connectController = controller;
+    appState.connecting = true;
     $('#connectionStatus').textContent = '正在连接';
     $('.connection-chip').classList.remove('connected');
     setStatus('正在连接服务器并扫描允许管理的目录…');
+    setBusy(true);
     try {
-      await bridgeCall('saveSettings', getConnectionSettings());
-      const result = await bridgeCall('connect', {});
+      await bridgeCall('saveSettings', getConnectionSettings(), { signal: controller.signal });
+      const result = await bridgeCall('connect', {}, { signal: controller.signal });
+      if (generation !== appState.connection.connectGeneration || controller.signal.aborted) return;
       clearStickerImageCache();
       appState.memoryFiles = result.memoryFiles || [];
       appState.stickerRows = result.stickerFiles || [];
@@ -204,9 +215,16 @@
       setStatus('SSH 连接成功，已读取 ' + result.memoryCount + ' 个记忆文档和 ' + result.stickerCount + ' 张图片。');
       showToast('服务器连接成功。');
     } catch (error) {
+      if (controller.signal.aborted || (error && error.name === 'AbortError')) return;
       $('#connectionStatus').textContent = '连接失败';
       $('.connection-chip').classList.remove('connected');
       $('#backupButton').disabled = true; reportError(error);
+    } finally {
+      if (generation === appState.connection.connectGeneration) {
+        appState.connecting = false;
+        if (appState.connection.connectController === controller) appState.connection.connectController = null;
+        setBusy(false);
+      }
     }
   }
 
@@ -221,13 +239,18 @@
   async function saveRawEditor() {
     const catalog = $('#rawCatalog').value;
     const manifest = $('#rawManifest').value;
+    appState.sticker.rawSaveController?.abort();
+    const controller = new AbortController();
+    const generation = ++appState.sticker.rawSaveGeneration;
+    appState.sticker.rawSaveController = controller;
     try {
       JSON.parse(catalog);
       const before = 'catalog.json\n' + appState.originalCatalog + '\n\n----- MANIFEST.md -----\n' + appState.originalManifest;
       const after = 'catalog.json\n' + catalog + '\n\n----- MANIFEST.md -----\n' + manifest;
       const okay = await review('保存表情包原始标签文件', before, after);
       if (!okay) return;
-      const result = await bridgeCall('saveStickerRaw', { catalog: catalog, manifest: manifest });
+      const result = await bridgeCall('saveStickerRaw', { catalog: catalog, manifest: manifest }, { signal: controller.signal });
+      if (generation !== appState.sticker.rawSaveGeneration || controller.signal.aborted) return;
       appState.originalCatalog = result.catalogText || catalog; appState.originalManifest = result.manifestText || manifest;
       if (result.stickerFiles) appState.stickerRows = result.stickerFiles;
       appState.stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
@@ -240,7 +263,11 @@
       setStatus(result.changed ? '原始标签文件已同步保存；已生成加密回滚快照。' : '原始文件没有变化。');
       showToast('原始标签文件已保存。');
 
-    } catch (error) { reportError(error); }
+    } catch (error) {
+      if (!controller.signal.aborted && !(error && error.name === 'AbortError')) reportError(error);
+    } finally {
+      if (appState.sticker.rawSaveController === controller) appState.sticker.rawSaveController = null;
+    }
   }
 
   async function boot() {
@@ -252,6 +279,7 @@
         syncBackupButton();
       }
     });
+    await appState.bridge.ready;
     appState.themeController = window.OpenClawTheme.create({ bridgeCall, showToast, reportError });
     appState.stickerCacheController = window.OpenClawStickerCache.create({ bridgeCall });
     appState.memoryController = window.OpenClawMemoryController.create({

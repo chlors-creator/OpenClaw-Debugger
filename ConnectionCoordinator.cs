@@ -10,6 +10,7 @@ public sealed class ConnectionCoordinator : IDisposable
     private readonly RemoteFileClient _remoteFiles;
     private readonly RemoteStickerClient _remoteStickers;
     private readonly RemoteSnapshotClient _snapshotClient = new();
+    private readonly SemaphoreSlim _connectGate = new(1, 1);
     private LocalSnapshotStore? _snapshots;
     private UserSettings? _settings;
     private bool _initialized;
@@ -74,16 +75,19 @@ public sealed class ConnectionCoordinator : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_initialized || !ReferenceEquals(_settings, settings))
             throw new InvalidOperationException("连接协调器尚未使用当前设置初始化。" );
-        if (_isBusy()) throw new InvalidOperationException("当前有操作正在进行。" );
-        _setBusy(true);
+        await _connectGate.WaitAsync(cancellationToken);
         try
         {
+            if (_isBusy()) throw new InvalidOperationException("当前有操作正在进行。" );
+            _setBusy(true);
+            try
+            {
             await SettingsRepository.SaveAsync(settings);
             Files = await _remoteFiles.ConnectAndListAsync(settings.Connection, cancellationToken);
             IsConnected = true;
             Memory?.Reset();
             var stickerService = Stickers ?? throw new InvalidOperationException("表情包服务未初始化。" );
-            var stickerLoad = await stickerService.LoadAsync(Files);
+            var stickerLoad = await stickerService.LoadAsync(Files, cancellationToken);
             var memories = Files.Where(x => x.Root == "workspace" && !x.IsImage && x.Editable)
                 .OrderBy(x => x.RelativePath.StartsWith("memory/", StringComparison.Ordinal) ? 1 : 0)
                 .ThenBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase)
@@ -102,16 +106,18 @@ public sealed class ConnectionCoordinator : IDisposable
                 stickerLoad.StickerStatus,
                 settings.Connection.WorkspacePath,
                 settings.Connection.StickersPath);
+            }
+            catch
+            {
+                IsConnected = false;
+                throw;
+            }
+            finally
+            {
+                _setBusy(false);
+            }
         }
-        catch
-        {
-            IsConnected = false;
-            throw;
-        }
-        finally
-        {
-            _setBusy(false);
-        }
+        finally { _connectGate.Release(); }
     }
 
     public void Dispose()

@@ -60,6 +60,11 @@
 
 
   async function selectSticker(row) {
+    state.saveController?.abort();
+    state.previewController?.abort();
+    const generation = ++state.previewGeneration;
+    const controller = new AbortController();
+    state.previewController = controller;
     state.current = row.imagePath;
     state.previewLoading = true;
     renderStickerList();
@@ -72,17 +77,19 @@
     $('.placeholder-art').hidden = false;
     $('#stickerStatus').textContent = fileIsGif(row.imagePath) ? '正在读取 GIF 动图…' : '正在读取图片…';
     try {
-      const preview = await loadStickerImage(row.imagePath);
-      if (state.current !== row.imagePath) return;
+      const preview = await loadStickerImage(row.imagePath, { signal: controller.signal });
+      if (generation !== state.previewGeneration || state.current !== row.imagePath || controller.signal.aborted) return;
       $('#stickerImage').src = preview.dataUrl;
       $('#stickerImage').hidden = false;
       $('.placeholder-art').hidden = true;
       $('#stickerSize').textContent = sizeLabel(preview.size);
       $('#stickerStatus').textContent = fileIsGif(row.imagePath) ? 'GIF 已加载并由内嵌浏览器原生播放。' : '图片预览已加载。';
     } catch (error) {
-      if (state.current === row.imagePath) $('#stickerStatus').textContent = '图片读取失败：' + error.message;
+      if (!controller.signal.aborted && !(error && error.name === 'AbortError') && generation === state.previewGeneration && state.current === row.imagePath)
+        $('#stickerStatus').textContent = '图片读取失败：' + error.message;
     } finally {
-      if (state.current === row.imagePath) { state.previewLoading = false; syncRenameButton(); }
+      if (state.previewController === controller) state.previewController = null;
+      if (generation === state.previewGeneration && state.current === row.imagePath) { state.previewLoading = false; syncRenameButton(); }
     }
   }
 
@@ -104,8 +111,11 @@
     if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(newName)) { showToast('请保留原图片扩展名。', true); return; }
     state.renameInProgress = true; setBusy(true);
     $('#renameConfirmButton').disabled = true;
+    const controller = new AbortController();
+    state.renameController?.abort();
+    state.renameController = controller;
     try {
-      const result = await bridgeCall('renameSticker', { oldFileName: oldName, newFileName: newName });
+      const result = await bridgeCall('renameSticker', { oldFileName: oldName, newFileName: newName }, { signal: controller.signal });
       moveStickerImageCache(oldName, result.fileName);
       state.rows = result.stickerFiles || state.rows;
       state.originalRows = snapshotStickerRows();
@@ -121,8 +131,8 @@
       if (renamed) await selectSticker(renamed);
       setStatus('已重命名，并同步更新 catalog.json 与 MANIFEST.md。');
       showToast('表情包重命名完成。');
-    } catch (error) { reportError(error); }
-    finally { state.renameInProgress = false; $('#renameConfirmButton').disabled = false; setBusy(false); }
+    } catch (error) { if (!controller.signal.aborted && !(error && error.name === 'AbortError')) reportError(error); }
+    finally { if (state.renameController === controller) state.renameController = null; state.renameInProgress = false; $('#renameConfirmButton').disabled = false; setBusy(false); }
   }
 
 
@@ -132,12 +142,21 @@
   async function saveStickerRows() {
     if (!state.dirty) return;
     if (state.rows.some(row => row.weightInvalid)) { showToast('权重必须是 0 到 1,000,000 之间的数字。', true); return; }
+    const controller = new AbortController();
+    state.saveController?.abort();
+    state.saveController = controller;
+    const payloadBeforeSave = JSON.stringify(rowsPayload());
     try {
-      const preview = await bridgeCall('previewStickerRows', { rows: rowsPayload() });
+      const preview = await bridgeCall('previewStickerRows', { rows: JSON.parse(payloadBeforeSave) }, { signal: controller.signal });
       const okay = await review('保存表情包标签与权重（两份文件）', preview.before, preview.after);
       if (!okay) return;
       $('#saveStickerButton').disabled = true;
-      const result = await bridgeCall('saveStickerRows', { rows: rowsPayload() });
+      const result = await bridgeCall('saveStickerRows', { rows: JSON.parse(payloadBeforeSave) }, { signal: controller.signal });
+      if (JSON.stringify(rowsPayload()) !== payloadBeforeSave) {
+        setStatus('服务器已保存本次修改；检测到新的本地编辑，保留在当前页面。');
+        showToast('已有新的本地修改未保存。');
+        return;
+      }
       state.catalog = result.catalogText || state.catalog;
       state.manifest = result.manifestText || state.manifest;
       if (result.stickerFiles) state.rows = result.stickerFiles;
@@ -146,7 +165,8 @@
       state.dirty = false; setDirtyState(); renderStickerList();
       setStatus(result.changed ? '表情包标签与权重已同步保存；生成 ' + result.snapshotCount + ' 份加密快照。' : '表情包设置没有变化。');
       showToast('表情包标签已保存。');
-    } catch (error) { reportError(error); $('#saveStickerButton').disabled = false; }
+    } catch (error) { if (!controller.signal.aborted && !(error && error.name === 'AbortError')) { reportError(error); $('#saveStickerButton').disabled = false; } }
+    finally { if (state.saveController === controller) state.saveController = null; }
   }
 
 

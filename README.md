@@ -59,6 +59,7 @@ OpenClaw-Debugger/
 │   ├── styles.css         # 基础布局、组件和动效
 │   ├── styles-overrides.css # 主题、调色板、上传和备份覆盖样式
 │   ├── bridge.js          # WebView 消息请求/响应和进度事件
+│   ├── bridge-contract.json # 前后端桥接协议版本、命令和参数结构
 │   ├── theme.js           # 主题、调色板和背景调节控制器
 │   ├── sticker-cache.js    # 原图/缩略图缓存控制器
 │   ├── memory-controller.js # 记忆列表、预览和保存控制器
@@ -67,6 +68,11 @@ OpenClaw-Debugger/
 │   ├── backup-controller.js # 备份进度、暂停、继续和取消控制器
 │   ├── settings-controller.js # 连接设置表单控制器
 │   ├── app-state.js        # 跨控制器共享状态和状态适配器
+│   ├── connection-state.js # 连接状态、代际编号和取消控制器
+│   ├── memory-state.js     # 记忆编辑状态和读取/保存控制器引用
+│   ├── sticker-state.js    # 表情包、预览、重命名和保存状态
+│   ├── backup-state.js     # 备份进度、暂停和取消状态
+│   ├── settings-state.js   # 连接设置状态
 │   ├── event-bindings.js   # DOM 事件、拖放和窗口事件绑定
 │   └── app.js             # 页面编排和生命周期
 ├── App.xaml(.cs)          # WPF 应用入口
@@ -75,6 +81,8 @@ OpenClaw-Debugger/
 ├── BridgeDispatcher.cs    # WebView 消息解析、来源校验和命令分发
 ├── BridgeResponseWriter.cs # WebView 响应和进度事件输出
 ├── BridgeCommandRouter.cs # 命令注册表和未注册命令拒绝
+├── BridgeCommandContract.cs # 桥接协议加载、参数校验和命令一致性检查
+├── BridgeProtocol.cs       # 桥接协议版本
 ├── ConnectionBridgeHandler.cs # 初始化、连接和设置命令处理器
 ├── MemoryBridgeHandler.cs # 记忆命令处理器
 ├── StickerBridgeHandler.cs # 表情包命令处理器
@@ -131,12 +139,16 @@ OpenClaw-Debugger/
 
 - `WebUi/` 是 HTML UI 的唯一界面层；静态资源随构建复制。不要把远程 CDN 作为运行依赖。
 - UI 通过映射到固定来源 `https://openclaw.local` 的 WebView2 页面加载，并通过类型化消息调用宿主功能。
+- `WebUi/bridge-contract.json` 是桥接协议清单，定义协议版本、命令、超时和参数类型；桌面宿主启动时会加载并校验所有处理器，WebView 调用时也使用同一清单选择超时。
 - `MainWindow.xaml.cs` 只负责 WebView 生命周期、窗口关闭和控制器装配；`ConnectionCoordinator.cs` 负责连接生命周期、远程客户端和业务服务装配；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件，`BridgeCommandRouter.cs` 与各 `*BridgeHandler.cs` 负责按领域注册命令。
+- 桌面宿主为远程命令建立互斥闸门，重复连接、备份和编辑会被拒绝；每个 WebView 请求都有独立取消令牌，`cancelOperation` 和窗口关闭会取消仍在运行的任务。
 - `MemoryService.cs` 负责记忆文件读取、二次哈希校验、DPAPI 回滚快照和保存；`SettingsService.cs` 负责连接设置校验及主题偏好持久化。
 - `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
 - `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责快照域接口。
 - `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界；`RemoteOpenClawClient.cs` 只保留领域门面，`RemoteAgentSession.cs` 管理复用 SSH 会话，`RemoteStickerStreamUploader.cs` 管理低内存流式上传，`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
 - `WebUi/app.js` 只负责编排和生命周期；`app-state.js` 管理跨控制器共享状态，`event-bindings.js` 管理 DOM、拖放和窗口事件，`memory-controller.js`、`sticker-controller.js`、`upload-controller.js`、`backup-controller.js`、`settings-controller.js` 各自维护对应功能；`bridge.js`、`theme.js`、`sticker-cache.js` 维护桥接、主题和缓存状态，样式覆盖集中在 `styles-overrides.css`。
+- `app-state.js` 只组合五个领域状态模块；连接、记忆读取、图片预览、重命名、标签保存和备份均带代际检查或 `AbortController`，旧请求返回后不会覆盖当前页面。
+- 表情包上传按 `Blob.slice()` 逐块读取浏览器文件，每块计算 SHA-256，失败块最多自动重试 3 次；后端按偏移和校验值接收，并对重复提交的同一分块幂等返回，浏览器不会再一次性读取整张图片。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
 
@@ -156,6 +168,13 @@ OpenClaw-Debugger/
 
 - `ConnectionCoordinator.cs` 接管连接扫描、远程客户端、记忆服务、表情包服务和备份服务的创建与释放；`MainWindow.xaml.cs` 不再持有远程客户端和连接扫描实现。
 - `app-state.js` 集中维护前端状态及记忆、表情包、上传、备份、设置状态适配器；`event-bindings.js` 集中维护导航、编辑器、拖放、主题和窗口事件，控制器通过显式依赖接收所需回调。
+
+## P5 生命周期、协议与上传优化
+
+- WebView 请求统一携带协议版本和操作 ID；宿主按 `bridge-contract.json` 校验命令参数、设置服务端超时，并用取消令牌管理每个运行中的请求。
+- 连接、读取、编辑、重命名、上传提交和服务器备份使用互斥闸门；重复连接或备份会被拒绝，编辑和备份不能同时运行。窗口关闭时会取消桥接请求、备份、SSH 会话和本地上传临时文件。
+- 连接、记忆读取/保存、图片预览、原始标签保存和备份使用 `AbortController` 与代际检查，旧请求完成后不会覆盖新页面状态。
+- 表情包上传按固定分块从 `Blob` 读取，每块携带偏移和 SHA-256；失败块最多重试 3 次，服务器对已接收的相同分块幂等确认，避免重复上传和整图内存占用。
 
 ## 运行与构建
 
@@ -182,7 +201,7 @@ dotnet build .\OpenClawDebugger.csproj
 
 ## 当前状态与交接提示
 
-- 最近一次已完成构建：`P4Split` 配置输出到 `bin\P4Split\net10.0-windows`，构建成功，0 个警告、0 个错误；所有 Web UI JavaScript 文件均通过 `node --check`，前端模块加载烟雾检查通过，并执行了工作树差异检查。没有执行真实服务器整机备份或恢复测试。
+- 最近一次已完成构建：`Lifecycle` 配置输出到 `bin\Lifecycle\net10.0-windows`，构建成功，0 个警告、0 个错误；所有 Web UI JavaScript 文件均通过语法检查，前端状态模块烟雾检查通过，并执行了工作树差异检查。没有执行真实服务器整机备份或恢复测试。
 - 桌面快捷方式仍按本机发布目录配置；构建输出切换后请从对应发布目录重新启动。已运行的旧窗口不会热更新；关闭后从桌面快捷方式重新启动即可加载新版。
 - 仓库目标目录是 `Openclaw\OpenClaw-Debugger`。此前项目从 Napcat 工作区迁移到 Openclaw；修改前应先核对当前实际工作目录，避免改错同名目录。
 - 新对话开始时先读本 README、`git status` 和相关源码，再确认用户当前要改的功能。不要假设工作树干净，也不要把私密目录复制进仓库。

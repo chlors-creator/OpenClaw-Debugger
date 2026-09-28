@@ -11,8 +11,8 @@ public sealed class MemoryBridgeHandler
 
     public void Register(BridgeCommandRouter router)
     {
-        router.Map("readMemory", async payload => await Require().ReadAsync(payload));
-        router.Map("saveMemory", async payload => await Require().SaveAsync(payload));
+        router.Map("readMemory", async (payload, cancellationToken) => await Require().ReadAsync(payload, cancellationToken));
+        router.Map("saveMemory", async (payload, cancellationToken) => await Require().SaveAsync(payload, cancellationToken));
     }
 
     private MemoryService Require() => _service() ?? throw new InvalidOperationException("记忆服务未初始化。");

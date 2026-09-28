@@ -3,13 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>OpenClaw Debugger</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="styles-overrides.css">
   <script src="bridge.js" defer></script>
   <script src="theme.js" defer></script>
   <script src="sticker-cache.js" defer></script>
+  <script src="connection-state.js" defer></script>
+  <script src="memory-state.js" defer></script>
+  <script src="sticker-state.js" defer></script>
+  <script src="backup-state.js" defer></script>
+  <script src="settings-state.js" defer></script>
   <script src="app-state.js" defer></script>
   <script src="memory-controller.js" defer></script>
   <script src="sticker-controller.js" defer></script>

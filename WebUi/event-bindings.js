@@ -86,6 +86,17 @@
     $('#resetBackdrop').addEventListener('click', () => { resetBackdrop(); showToast('背景效果已恢复默认。'); });
     $$('.theme-option').forEach(button => button.addEventListener('click', () => persistTheme(button.dataset.theme)));
     window.addEventListener('beforeunload', event => {
+      appState.connection.connectController?.abort();
+      appState.memory.readController?.abort();
+      appState.memory.saveController?.abort();
+      appState.sticker.previewController?.abort();
+      appState.sticker.saveController?.abort();
+      appState.sticker.renameController?.abort();
+      appState.sticker.rawSaveController?.abort();
+      appState.sticker.uploadController?.abort();
+      appState.upload?.controller?.abort();
+      appState.backup.controller?.abort();
+      appState.bridge?.cancelAll();
       if (appState.dirtyMemory || appState.dirtyStickers || appState.dirtyRaw) { event.preventDefault(); event.returnValue = ''; }
     });
     }

@@ -8,13 +8,13 @@ public sealed class ConnectionBridgeHandler
     private readonly SettingsService _settingsService;
     private readonly Func<UserSettings> _settings;
     private readonly Func<bool> _isConnected;
-    private readonly Func<Task<object>> _connect;
+    private readonly Func<CancellationToken, Task<object>> _connect;
 
     public ConnectionBridgeHandler(
         SettingsService settingsService,
         Func<UserSettings> settings,
         Func<bool> isConnected,
-        Func<Task<object>> connect)
+        Func<CancellationToken, Task<object>> connect)
     {
         _settingsService = settingsService;
         _settings = settings;
@@ -34,7 +34,7 @@ public sealed class ConnectionBridgeHandler
         }));
         router.Map("saveSettings", SaveSettingsAsync);
         router.Map("setTheme", SetThemeAsync);
-        router.Map("connect", async _ => await _connect());
+        router.Map("connect", async (_, cancellationToken) => await _connect(cancellationToken));
     }
 
     private async Task<object?> SaveSettingsAsync(JsonElement payload)

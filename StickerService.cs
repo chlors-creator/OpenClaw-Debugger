@@ -68,7 +68,7 @@ public sealed class StickerService : IDisposable
 
     public IReadOnlyList<RemoteFile> Files => _files;
 
-    public async Task<StickerLoadResult> LoadAsync(IReadOnlyList<RemoteFile> files)
+    public async Task<StickerLoadResult> LoadAsync(IReadOnlyList<RemoteFile> files, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         _files = files;
@@ -87,8 +87,8 @@ public sealed class StickerService : IDisposable
         {
             try
             {
-                var catTask = _filesRemote.ReadAsync(_connection(), _catalogFile);
-                var manifestTask = _filesRemote.ReadAsync(_connection(), _manifestFile);
+                var catTask = _filesRemote.ReadAsync(_connection(), _catalogFile, cancellationToken);
+                var manifestTask = _filesRemote.ReadAsync(_connection(), _manifestFile, cancellationToken);
                 await Task.WhenAll(catTask, manifestTask);
                 _catalogContent = catTask.Result;
                 _manifestContent = manifestTask.Result;
@@ -98,6 +98,7 @@ public sealed class StickerService : IDisposable
                 else
                     stickerStatus = error;
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 stickerStatus = "读取目录失败：" + ex.Message;
@@ -114,12 +115,12 @@ public sealed class StickerService : IDisposable
             stickerStatus);
     }
 
-    public async Task<object> ReadAsync(JsonElement payload)
+    public async Task<object> ReadAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         var path = payload.GetProperty("path").GetString() ?? "";
         var file = FindImage(path);
-        var content = await _filesRemote.ReadAsync(_connection(), file);
+        var content = await _filesRemote.ReadAsync(_connection(), file, cancellationToken);
         if (content.Binary is null) throw new InvalidDataException("服务器返回的图片数据为空。");
         var mime = Path.GetExtension(file.RelativePath).ToLowerInvariant() switch
         {
@@ -130,12 +131,12 @@ public sealed class StickerService : IDisposable
         return new { path, dataUrl = "data:" + mime + ";base64," + Convert.ToBase64String(content.Binary), size = content.Size };
     }
 
-    public async Task<object> ReadThumbnailAsync(JsonElement payload)
+    public async Task<object> ReadThumbnailAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         var path = payload.GetProperty("path").GetString() ?? "";
         var file = FindImage(path);
-        return await _thumbnailCache.ReadAsync(_filesRemote, _connection(), file);
+        return await _thumbnailCache.ReadAsync(_filesRemote, _connection(), file, cancellationToken);
     }
 
     public object PreviewRows(JsonElement payload)
@@ -181,7 +182,7 @@ public sealed class StickerService : IDisposable
         };
     }
 
-    public async Task<object> SaveRowsAsync(JsonElement payload)
+    public async Task<object> SaveRowsAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         EnsureCatalogLoaded();
@@ -203,10 +204,10 @@ public sealed class StickerService : IDisposable
             throw new InvalidOperationException("标签原始内容没有加载。");
         if (!StickerManifestSynchronizer.TryUpdate(_manifestContent.Text, _catalog.Rows, out var updatedManifest, out var error))
             throw new InvalidDataException(error);
-        return await SavePairAsync(updatedCatalog, updatedManifest);
+        return await SavePairAsync(updatedCatalog, updatedManifest, cancellationToken);
     }
 
-    public async Task<object> SaveRawAsync(JsonElement payload)
+    public async Task<object> SaveRawAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         if (_catalogContent?.Text is null || _manifestContent?.Text is null)
@@ -214,10 +215,10 @@ public sealed class StickerService : IDisposable
         var catalog = payload.GetProperty("catalog").GetString() ?? "";
         var manifest = payload.GetProperty("manifest").GetString() ?? "";
         using var _ = JsonDocument.Parse(catalog);
-        return await SavePairAsync(catalog, manifest);
+        return await SavePairAsync(catalog, manifest, cancellationToken);
     }
 
-    private async Task<object> SavePairAsync(string updatedCatalog, string updatedManifest)
+    private async Task<object> SavePairAsync(string updatedCatalog, string updatedManifest, CancellationToken cancellationToken = default)
     {
         if (_catalogFile is null || _manifestFile is null || _catalogContent is null || _manifestContent is null || _snapshots() is null)
             throw new InvalidOperationException("标签文件或快照存储未就绪。");
@@ -237,8 +238,8 @@ public sealed class StickerService : IDisposable
         _setBusy(true);
         try
         {
-            var catTask = _filesRemote.ReadAsync(_connection(), _catalogFile);
-            var manifestTask = _filesRemote.ReadAsync(_connection(), _manifestFile);
+            var catTask = _filesRemote.ReadAsync(_connection(), _catalogFile, cancellationToken);
+            var manifestTask = _filesRemote.ReadAsync(_connection(), _manifestFile, cancellationToken);
             await Task.WhenAll(catTask, manifestTask);
             var latestCatalog = catTask.Result;
             var latestManifest = manifestTask.Result;
@@ -258,7 +259,7 @@ public sealed class StickerService : IDisposable
                 snapshotCount++;
             }
             var pair = await _stickersRemote.WriteStickerPairAsync(
-                _connection(), updatedCatalog, oldCatalog.Sha256, updatedManifest, oldManifest.Sha256);
+                _connection(), updatedCatalog, oldCatalog.Sha256, updatedManifest, oldManifest.Sha256, cancellationToken);
             var catalogBytes = new UTF8Encoding(false).GetBytes(updatedCatalog);
             var manifestBytes = new UTF8Encoding(false).GetBytes(updatedManifest);
             _catalogContent = oldCatalog with
@@ -286,7 +287,7 @@ public sealed class StickerService : IDisposable
         finally { _setBusy(false); }
     }
 
-    public async Task<object> RenameAsync(JsonElement payload)
+    public async Task<object> RenameAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         if (_isBusy()) throw new InvalidOperationException("当前有操作正在进行。");
@@ -354,8 +355,8 @@ public sealed class StickerService : IDisposable
         _setBusy(true);
         try
         {
-            var currentImage = await _filesRemote.ReadAsync(_connection(), oldFile);
-            var moved = await _stickersRemote.RenameStickerAsync(_connection(), oldName, newName, currentImage.Sha256);
+            var currentImage = await _filesRemote.ReadAsync(_connection(), oldFile, cancellationToken);
+            var moved = await _stickersRemote.RenameStickerAsync(_connection(), oldName, newName, currentImage.Sha256, cancellationToken);
             _files = plannedFiles.Select(file => file.Root == "stickers" && file.RelativePath == newName
                 ? new RemoteFile
                 {
@@ -364,12 +365,12 @@ public sealed class StickerService : IDisposable
                 }
                 : file).ToList();
 
-            try { await SavePairAsync(updatedCatalog, updatedManifest); }
+            try { await SavePairAsync(updatedCatalog, updatedManifest, cancellationToken); }
             catch (Exception saveError)
             {
                 try
                 {
-                    await _stickersRemote.RenameStickerAsync(_connection(), newName, oldName, moved.Sha256);
+                    await _stickersRemote.RenameStickerAsync(_connection(), newName, oldName, moved.Sha256, CancellationToken.None);
                     _files = _files.Select(file => file.Root == "stickers" && file.RelativePath == newName
                         ? new RemoteFile
                         {
@@ -415,21 +416,27 @@ public sealed class StickerService : IDisposable
         EnsureConnected();
         var fileName = payload.GetProperty("fileName").GetString() ?? "";
         var size = payload.GetProperty("size").GetInt64();
-        return _uploads.Begin(fileName, size, _files, _privateDirectory());
+        var result = _uploads.Begin(fileName, size, _files, _privateDirectory());
+        _setBusy(true);
+        return result;
     }
 
     public StickerUploadAppendResult AppendUpload(JsonElement payload)
     {
         var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
+        var offset = payload.GetProperty("offset").GetInt64();
         var contentBase64 = payload.GetProperty("contentBase64").GetString() ?? "";
-        return _uploads.Append(uploadId, contentBase64);
+        var sha256 = payload.GetProperty("sha256").GetString() ?? "";
+        return _uploads.Append(uploadId, offset, contentBase64, sha256);
     }
 
-    public async Task<object> CommitUploadAsync(JsonElement payload)
+    public async Task<object> CommitUploadAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
         using var session = _uploads.TakeForCommit(uploadId);
+        try
+        {
         if (session.Content.Length != session.Size) throw new InvalidDataException("上传内容长度不完整，请重新上传。");
         session.Content.Flush(flushToDisk: true);
         session.Content.Position = 0;
@@ -458,11 +465,8 @@ public sealed class StickerService : IDisposable
             throw new InvalidDataException("图片尚未上传，无法校验自动登记：" + verifyError);
         }
 
-        _setBusy(true);
-        try
-        {
             RemoteStickerUploadResult uploaded;
-            try { uploaded = await _stickersRemote.UploadStickerAsync(_connection(), session.FileName, session.Content, session.Size); }
+            try { uploaded = await _stickersRemote.UploadStickerAsync(_connection(), session.FileName, session.Content, session.Size, cancellationToken); }
             catch { RestoreCatalog(); throw; }
 
             _files = _files.Append(new RemoteFile
@@ -471,7 +475,7 @@ public sealed class StickerService : IDisposable
                 Sha256 = uploaded.Sha256, ModifiedUtc = DateTimeOffset.UtcNow, Editable = false
             }).ToList();
 
-            try { await SavePairAsync(updatedCatalog, updatedManifest); }
+            try { await SavePairAsync(updatedCatalog, updatedManifest, cancellationToken); }
             catch (Exception registrationError)
             {
                 RestoreCatalog();
@@ -511,6 +515,7 @@ public sealed class StickerService : IDisposable
     {
         var uploadId = payload.GetProperty("uploadId").GetString() ?? "";
         _uploads.Cancel(uploadId);
+        _setBusy(false);
     }
 
     public List<StickerUiRow> GetUiRows()
@@ -525,7 +530,11 @@ public sealed class StickerService : IDisposable
         return rows;
     }
 
-    public void Dispose() => _uploads.Dispose();
+    public void Dispose()
+    {
+        _uploads.Dispose();
+        _setBusy(false);
+    }
 
     private RemoteFile FindImage(string path)
     {

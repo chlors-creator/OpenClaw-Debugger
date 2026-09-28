@@ -27,9 +27,9 @@ public sealed class BackupBridgeHandler
         router.Map("openBackupFolder", _ => OpenBackupFolder());
     }
 
-    private async Task<object?> BackupAsync(JsonElement _)
+    private async Task<object?> BackupAsync(JsonElement _, CancellationToken cancellationToken)
     {
-        var result = await Require().StartAsync(_settings());
+        var result = await Require().StartAsync(_settings(), cancellationToken);
         return new
         {
             directory = result.Directory,

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace OpenClawDebugger;
@@ -21,6 +22,7 @@ public sealed class StickerUploadSession : IDisposable
     public long Size { get; }
     public string TemporaryPath { get; }
     public FileStream Content { get; }
+    public Dictionary<long, string> ChunkHashes { get; } = new();
 
     public void Dispose()
     {
@@ -57,7 +59,7 @@ public sealed class StickerUploadService : IDisposable
         return new StickerUploadBeginResult(id, ChunkSize);
     }
 
-    public StickerUploadAppendResult Append(string uploadId, string contentBase64)
+    public StickerUploadAppendResult Append(string uploadId, long offset, string contentBase64, string expectedSha256)
     {
         if (!_sessions.TryGetValue(uploadId, out var session))
             throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
@@ -70,12 +72,26 @@ public sealed class StickerUploadService : IDisposable
             throw new InvalidDataException("上传数据编码无效。");
         }
 
-        if (chunk.Length is < 1 or > ChunkSize || session.Content.Length + chunk.Length > session.Size)
+        if (chunk.Length is < 1 or > ChunkSize || offset < 0 || offset > session.Size || offset + chunk.Length > session.Size)
         {
-            RemoveAndDispose(uploadId, session);
             throw new InvalidDataException("上传分块大小或总长度超出限制。");
         }
+        var actualSha256 = Convert.ToHexString(SHA256.HashData(chunk)).ToLowerInvariant();
+        if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("上传分块校验失败，请重试当前分块。");
+
+        if (offset < session.Content.Length)
+        {
+            if (offset + chunk.Length == session.Content.Length &&
+                session.ChunkHashes.TryGetValue(offset, out var priorHash) &&
+                string.Equals(priorHash, actualSha256, StringComparison.OrdinalIgnoreCase))
+                return new StickerUploadAppendResult(session.Content.Length, session.Size);
+            throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
+        }
+        if (offset != session.Content.Length)
+            throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
         session.Content.Write(chunk, 0, chunk.Length);
+        session.ChunkHashes[offset] = actualSha256;
         return new StickerUploadAppendResult(session.Content.Length, session.Size);
     }
 

@@ -124,6 +124,11 @@
   }
   async function backupServer() {
     if (!$('.connection-chip').classList.contains('connected')) return;
+    if (state.active) return;
+    state.controller?.abort();
+    const controller = new AbortController();
+    state.controller = controller;
+    state.generation = Number(state.generation || 0) + 1;
     state.active = true;
     state.paused = false;
     state.cancelRequested = false;
@@ -132,7 +137,7 @@
     state.lastProgress = null;
     renderBackupProgress({ phase: 'preparing', bytes: 0, totalBytes: null, attempt: 1, maxAttempts: 8 });
     try {
-      const result = await bridgeCall('backup', {});
+      const result = await bridgeCall('backup', {}, { signal: controller.signal });
       renderBackupProgress({ phase: 'completed', bytes: result.archiveBytes, totalBytes: result.archiveBytes });
       setStatus('整机快照完成：' + sizeLabel(result.archiveBytes) + ' · SHA-256 ' + result.sha256);
       showToast('服务器快照已完成：' + result.directory);
@@ -149,11 +154,12 @@
         });
         setStatus('服务器备份已取消。');
         showToast('服务器备份已取消。');
-      } else {
+      } else if (!controller.signal.aborted) {
         reportError(error);
         renderBackupProgress({ phase: 'failed', bytes: 0, totalBytes: last.totalBytes, message: error && error.message ? error.message : String(error) });
       }
     } finally {
+      if (state.controller === controller) state.controller = null;
       state.active = false;
       state.paused = false;
       state.cancelRequested = false;

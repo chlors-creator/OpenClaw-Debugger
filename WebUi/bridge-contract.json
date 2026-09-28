@@ -1,0 +1,29 @@
+{
+  "protocolVersion": 2,
+  "commands": {
+    "initialize": { "mode": "local", "domain": "local", "timeoutMs": 15000, "payload": {} },
+    "saveSettings": { "mode": "local", "domain": "settings", "timeoutMs": 30000, "payload": { "host": "string", "username": "string", "port": "integer", "workspacePath": "string", "stickersPath": "string" } },
+    "setTheme": { "mode": "local", "domain": "settings", "timeoutMs": 15000, "payload": { "theme": "string" } },
+    "connect": { "mode": "remote", "domain": "connection", "timeoutMs": 600000, "payload": {} },
+    "readMemory": { "mode": "remote", "domain": "read", "timeoutMs": 180000, "payload": { "path": "string" } },
+    "saveMemory": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "path": "string", "expectedSha256": "string", "text": "string" } },
+    "readSticker": { "mode": "remote", "domain": "read", "timeoutMs": 180000, "payload": { "path": "string" } },
+    "readStickerThumbnail": { "mode": "remote", "domain": "thumbnail", "timeoutMs": 180000, "payload": { "path": "string" } },
+    "previewStickerRows": { "mode": "local", "domain": "edit", "timeoutMs": 30000, "payload": { "rows": "array" } },
+    "saveStickerRows": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "rows": "array" } },
+    "saveStickerRaw": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "catalog": "string", "manifest": "string" } },
+    "beginStickerUpload": { "mode": "uploadStart", "domain": "edit", "timeoutMs": 30000, "payload": { "fileName": "string", "size": "integer" } },
+    "appendStickerUpload": { "mode": "uploadChunk", "domain": "upload", "timeoutMs": 60000, "payload": { "uploadId": "string", "offset": "integer", "contentBase64": "string", "sha256": "string" } },
+    "commitStickerUpload": { "mode": "uploadFinalize", "domain": "edit", "timeoutMs": 1800000, "payload": { "uploadId": "string" } },
+    "cancelStickerUpload": { "mode": "uploadCancel", "domain": "control", "timeoutMs": 15000, "payload": { "uploadId": "string" } },
+    "renameSticker": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "oldFileName": "string", "newFileName": "string" } },
+    "backup": { "mode": "remote", "domain": "backup", "timeoutMs": 7200000, "payload": {} },
+    "toggleBackupPause": { "mode": "control", "domain": "control", "timeoutMs": 15000, "payload": {} },
+    "cancelBackup": { "mode": "control", "domain": "control", "timeoutMs": 15000, "payload": {} },
+    "openPrivateFolder": { "mode": "local", "domain": "local", "timeoutMs": 15000, "payload": {} },
+    "openBackupFolder": { "mode": "local", "domain": "local", "timeoutMs": 15000, "payload": {} },
+    "draftState": { "mode": "local", "domain": "local", "timeoutMs": 15000, "payload": { "dirty": "boolean" } },
+    "close": { "mode": "control", "domain": "control", "timeoutMs": 15000, "payload": {} },
+    "cancelOperation": { "mode": "control", "domain": "control", "timeoutMs": 15000, "payload": { "operationId": "string" } }
+  }
+}

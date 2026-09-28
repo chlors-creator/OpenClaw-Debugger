@@ -1,41 +1,52 @@
 (function () {
   'use strict';
 
+  function alias(target, name, source, key) {
+    Object.defineProperty(target, name, {
+      configurable: true,
+      enumerable: true,
+      get: () => source[key],
+      set: value => { source[key] = value; }
+    });
+  }
+
   function create() {
+    const connection = window.OpenClawConnectionState.create();
+    const memory = window.OpenClawMemoryState.create();
+    const sticker = window.OpenClawStickerState.create();
+    const backup = window.OpenClawBackupState.create();
+    const settings = window.OpenClawSettingsState.create();
     const state = {
-      bridge: null,
-      toastTimer: 0,
-      dirtySyncTimer: 0,
-      uploadInProgress: false,
-      renameInProgress: false,
-      stickerPreviewLoading: false,
-      stickerThumbnailObserver: null,
-      currentTab: 'overview',
-      settings: {
-        host: '106.14.173.90',
-        username: 'admin',
-        port: 22,
-        workspacePath: '/home/admin/.openclaw/workspace',
-        stickersPath: '/home/admin/.openclaw/workspace/stickers'
+      connection,
+      memory,
+      sticker,
+      backup,
+      settings,
+      upload: {
+        controller: null,
+        get inProgress() { return sticker.uploadInProgress; },
+        set inProgress(value) { sticker.uploadInProgress = Boolean(value); },
+        get dirtyMemory() { return memory.dirty; },
+        set dirtyMemory(value) { memory.dirty = Boolean(value); },
+        get dirtyStickers() { return sticker.dirty; },
+        set dirtyStickers(value) { sticker.dirty = Boolean(value); },
+        get dirtyRaw() { return sticker.rawDirty; },
+        set dirtyRaw(value) { sticker.rawDirty = Boolean(value); },
+        get rows() { return sticker.rows; },
+        set rows(value) { sticker.rows = value || []; },
+        get catalog() { return sticker.catalog; },
+        set catalog(value) { sticker.catalog = value || ''; },
+        get manifest() { return sticker.manifest; },
+        set manifest(value) { sticker.manifest = value || ''; },
+        get originalRows() { return sticker.originalRows; },
+        set originalRows(value) { sticker.originalRows = value || []; },
+        get editingEnabled() { return sticker.editingEnabled; },
+        set editingEnabled(value) { sticker.editingEnabled = Boolean(value); }
       },
-      memoryFiles: [],
-      currentMemory: null,
-      memoryOriginal: '',
-      memoryEditing: false,
-      stickerRows: [],
-      currentSticker: null,
-      stickerEditingEnabled: false,
-      originalCatalog: '',
-      originalManifest: '',
-      dirtyMemory: false,
-      dirtyStickers: false,
-      dirtyRaw: false,
-      originalStickerRows: [],
-      lastBackupProgress: null,
-      backupActive: false,
-      backupPaused: false,
-      backupCancelRequested: false,
-      backupControlsClosing: false,
+      settingsModel: {
+        get value() { return settings.value; },
+        set value(value) { settings.value = value || settings.value; }
+      },
       themeController: null,
       stickerCacheController: null,
       memoryController: null,
@@ -46,45 +57,33 @@
       eventBindings: null
     };
 
-    state.memory = {
-      get files() { return state.memoryFiles; }, set files(value) { state.memoryFiles = value || []; },
-      get current() { return state.currentMemory; }, set current(value) { state.currentMemory = value; },
-      get original() { return state.memoryOriginal; }, set original(value) { state.memoryOriginal = value || ''; },
-      get editing() { return state.memoryEditing; }, set editing(value) { state.memoryEditing = Boolean(value); },
-      get dirty() { return state.dirtyMemory; }, set dirty(value) { state.dirtyMemory = Boolean(value); }
-    };
-    state.sticker = {
-      get rows() { return state.stickerRows; }, set rows(value) { state.stickerRows = value || []; },
-      get current() { return state.currentSticker; }, set current(value) { state.currentSticker = value; },
-      get editingEnabled() { return state.stickerEditingEnabled; }, set editingEnabled(value) { state.stickerEditingEnabled = Boolean(value); },
-      get catalog() { return state.originalCatalog; }, set catalog(value) { state.originalCatalog = value || ''; },
-      get manifest() { return state.originalManifest; }, set manifest(value) { state.originalManifest = value || ''; },
-      get originalRows() { return state.originalStickerRows; }, set originalRows(value) { state.originalStickerRows = value || []; },
-      get dirty() { return state.dirtyStickers; }, set dirty(value) { state.dirtyStickers = Boolean(value); },
-      get previewLoading() { return state.stickerPreviewLoading; }, set previewLoading(value) { state.stickerPreviewLoading = Boolean(value); },
-      get renameInProgress() { return state.renameInProgress; }, set renameInProgress(value) { state.renameInProgress = Boolean(value); }
-    };
-    state.upload = {
-      get inProgress() { return state.uploadInProgress; }, set inProgress(value) { state.uploadInProgress = Boolean(value); },
-      get dirtyMemory() { return state.dirtyMemory; }, set dirtyMemory(value) { state.dirtyMemory = Boolean(value); },
-      get dirtyStickers() { return state.dirtyStickers; }, set dirtyStickers(value) { state.dirtyStickers = Boolean(value); },
-      get dirtyRaw() { return state.dirtyRaw; }, set dirtyRaw(value) { state.dirtyRaw = Boolean(value); },
-      get rows() { return state.stickerRows; }, set rows(value) { state.stickerRows = value || []; },
-      get catalog() { return state.originalCatalog; }, set catalog(value) { state.originalCatalog = value || ''; },
-      get manifest() { return state.originalManifest; }, set manifest(value) { state.originalManifest = value || ''; },
-      get originalRows() { return state.originalStickerRows; }, set originalRows(value) { state.originalStickerRows = value || []; },
-      get editingEnabled() { return state.stickerEditingEnabled; }, set editingEnabled(value) { state.stickerEditingEnabled = Boolean(value); }
-    };
-    state.backup = {
-      get lastProgress() { return state.lastBackupProgress; }, set lastProgress(value) { state.lastBackupProgress = value; },
-      get active() { return state.backupActive; }, set active(value) { state.backupActive = Boolean(value); },
-      get paused() { return state.backupPaused; }, set paused(value) { state.backupPaused = Boolean(value); },
-      get cancelRequested() { return state.backupCancelRequested; }, set cancelRequested(value) { state.backupCancelRequested = Boolean(value); },
-      get controlsClosing() { return state.backupControlsClosing; }, set controlsClosing(value) { state.backupControlsClosing = Boolean(value); }
-    };
-    state.settingsModel = {
-      get value() { return state.settings; }, set value(value) { state.settings = value || state.settings; }
-    };
+    alias(state, 'bridge', connection, 'bridge');
+    alias(state, 'currentTab', connection, 'currentTab');
+    alias(state, 'connecting', connection, 'connecting');
+    alias(state, 'toastTimer', connection, 'toastTimer');
+    alias(state, 'dirtySyncTimer', connection, 'dirtySyncTimer');
+    alias(state, 'stickerThumbnailObserver', connection, 'stickerThumbnailObserver');
+    alias(state, 'memoryFiles', memory, 'files');
+    alias(state, 'currentMemory', memory, 'current');
+    alias(state, 'memoryOriginal', memory, 'original');
+    alias(state, 'memoryEditing', memory, 'editing');
+    alias(state, 'dirtyMemory', memory, 'dirty');
+    alias(state, 'stickerRows', sticker, 'rows');
+    alias(state, 'currentSticker', sticker, 'current');
+    alias(state, 'stickerEditingEnabled', sticker, 'editingEnabled');
+    alias(state, 'originalCatalog', sticker, 'catalog');
+    alias(state, 'originalManifest', sticker, 'manifest');
+    alias(state, 'originalStickerRows', sticker, 'originalRows');
+    alias(state, 'dirtyStickers', sticker, 'dirty');
+    alias(state, 'dirtyRaw', sticker, 'rawDirty');
+    alias(state, 'stickerPreviewLoading', sticker, 'previewLoading');
+    alias(state, 'renameInProgress', sticker, 'renameInProgress');
+    alias(state, 'uploadInProgress', sticker, 'uploadInProgress');
+    alias(state, 'lastBackupProgress', backup, 'lastProgress');
+    alias(state, 'backupActive', backup, 'active');
+    alias(state, 'backupPaused', backup, 'paused');
+    alias(state, 'backupCancelRequested', backup, 'cancelRequested');
+    alias(state, 'backupControlsClosing', backup, 'controlsClosing');
     return state;
   }
 

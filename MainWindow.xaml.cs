@@ -13,9 +13,13 @@ public partial class MainWindow : Window
     private readonly SettingsService _settingsService = new();
     private BridgeDispatcher? _bridgeDispatcher;
     private BridgeCommandRouter? _commandRouter;
+    private BridgeCommandContract? _bridgeContract;
     private readonly ConnectionCoordinator _connection;
+    private readonly SemaphoreSlim _remoteOperationGate = new(1, 1);
+    private readonly object _busySync = new();
     private UserSettings _settings = new();
     private bool _busy;
+    private int _busyCount;
     private bool _hasDrafts;
     private bool _closingApproved;
 
@@ -37,6 +41,9 @@ public partial class MainWindow : Window
             if (_settings.ThemeName is not ("Atri" or "Luoxi" or "Light")) _settings.ThemeName = "Atri";
             _connection.Initialize(_settings);
             _commandRouter = CreateCommandRouter();
+            var contractPath = Path.Combine(AppContext.BaseDirectory, "WebUi", "bridge-contract.json");
+            _bridgeContract = BridgeCommandContract.Load(contractPath);
+            _bridgeContract.ValidateRegisteredCommands(_commandRouter.Commands);
 
             await MainWebView.EnsureCoreWebView2Async();
             var core = MainWebView.CoreWebView2;
@@ -47,7 +54,7 @@ public partial class MainWindow : Window
             core.Settings.IsZoomControlEnabled = false;
             core.Settings.IsWebMessageEnabled = true;
             _bridgeResponses.Attach(core);
-            _bridgeDispatcher = new BridgeDispatcher(DispatchAsync, _bridgeResponses);
+            _bridgeDispatcher = new BridgeDispatcher(DispatchAsync, _bridgeResponses, _bridgeContract);
             core.WebMessageReceived += (_, args) => _ = _bridgeDispatcher.HandleAsync(args);
             core.NavigationStarting += (_, args) =>
             {
@@ -72,9 +79,34 @@ public partial class MainWindow : Window
         }
     }
 
-    private Task<object?> DispatchAsync(string command, JsonElement payload) =>
-        (_commandRouter ?? throw new InvalidOperationException("界面命令路由器未初始化。"))
-            .DispatchAsync(command, payload);
+    private async Task<object?> DispatchAsync(string command, JsonElement payload, CancellationToken cancellationToken)
+    {
+        var contract = _bridgeContract ?? throw new InvalidOperationException("界面协议尚未加载。");
+        var definition = contract.GetCommand(command);
+        var domain = definition.Domain ?? definition.Mode;
+        var allowedWhileBusy = domain is "control" or "upload" or "thumbnail" or "local" ||
+            definition.Mode is "uploadChunk" or "uploadFinalize" or "uploadCancel";
+        if (_busy && !allowedWhileBusy)
+            throw new InvalidOperationException("当前有操作正在进行，请等待完成或先取消当前操作。");
+
+        var router = _commandRouter ?? throw new InvalidOperationException("界面命令路由器未初始化。");
+        var serialized = domain is "connection" or "read" or "edit" or "backup" ||
+            definition.Mode == "uploadFinalize";
+        if (!serialized)
+            return await router.DispatchAsync(command, payload, cancellationToken);
+
+        await _remoteOperationGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_busy && !allowedWhileBusy)
+                throw new InvalidOperationException("当前有操作正在进行，请等待完成或先取消当前操作。");
+            return await router.DispatchAsync(command, payload, cancellationToken);
+        }
+        finally
+        {
+            _remoteOperationGate.Release();
+        }
+    }
 
     private BridgeCommandRouter CreateCommandRouter()
     {
@@ -83,7 +115,7 @@ public partial class MainWindow : Window
             _settingsService,
             () => _settings,
             () => _connection.IsConnected,
-            ConnectAsync).Register(router);
+        ConnectAsync).Register(router);
         new MemoryBridgeHandler(() => _connection.Memory).Register(router);
         new StickerBridgeHandler(() => _connection.Stickers).Register(router);
         new BackupBridgeHandler(() => _connection.Backup, () => _settings.Connection, OpenFolder).Register(router);
@@ -109,12 +141,16 @@ public partial class MainWindow : Window
         });
     }
 
-    private Task<object> ConnectAsync() => _connection.ConnectAsync(_settings);
+    private Task<object> ConnectAsync(CancellationToken cancellationToken) => _connection.ConnectAsync(_settings, cancellationToken);
 
     private void SetBusy(bool busy)
     {
-        _busy = busy;
-        _bridgeResponses.SendProgress("busy", new { busy });
+        lock (_busySync)
+        {
+            _busyCount = busy ? _busyCount + 1 : Math.Max(0, _busyCount - 1);
+            _busy = _busyCount > 0;
+        }
+        _bridgeResponses.SendProgress("busy", new { busy = _busy });
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
@@ -125,6 +161,7 @@ public partial class MainWindow : Window
             if (answer != MessageBoxResult.Yes) e.Cancel = true;
         }
         if (e.Cancel) return;
+        _bridgeDispatcher?.CancelAll();
         _connection.Dispose();
     }
 

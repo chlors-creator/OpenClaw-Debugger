@@ -63,14 +63,14 @@ function rememberStickerImage(path, preview) {
     return preview;
   }
 
-  function loadStickerImage(path) {
+  function loadStickerImage(path, options) {
     const cached = stickerImageCache.get(path);
     if (cached) {
       stickerImageCache.delete(path); stickerImageCache.set(path, cached);
       return Promise.resolve(cached);
     }
     if (stickerImageReads.has(path)) return stickerImageReads.get(path);
-    const read = deps.bridgeCall('readSticker', { path: path }).then(preview => rememberStickerImage(path, preview))
+    const read = deps.bridgeCall('readSticker', { path: path }, options).then(preview => rememberStickerImage(path, preview))
       .finally(() => stickerImageReads.delete(path));
     stickerImageReads.set(path, read);
     return read;
