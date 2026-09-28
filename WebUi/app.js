@@ -188,36 +188,21 @@
   function renderBackupProgress(data) {
     lastBackupProgress = data;
     const panel = $('#backupProgress');
-    const phase = data.phase || 'estimating';
+    const phase = data.phase || 'preparing';
     const bytes = Math.max(0, Number(data.bytes) || 0);
     const total = data.totalBytes === null || data.totalBytes === undefined ? null : Math.max(0, Number(data.totalBytes) || 0);
     const speed = Number(data.bytesPerSecond) || 0;
     const attempt = Math.max(1, Number(data.attempt) || 1);
     const maxAttempts = Math.max(1, Number(data.maxAttempts) || 1);
     const attemptLabel = attempt + '/' + maxAttempts;
-    const overEstimate = phase === 'transferring' && total > 0 && bytes > total;
     panel.hidden = false;
     panel.dataset.phase = phase;
     $('#backupTransferred').textContent = sizeLabel(bytes);
     $('#backupSpeed').textContent = speed > 0 ? sizeLabel(speed) + '/s' : '—';
-    $('#backupTotalSize').textContent = total > 0
-      ? (overEstimate ? '超过 ' + sizeLabel(total) + '（预估）' : sizeLabel(total) + (phase === 'transferring' || phase === 'retrying' ? '（预估）' : ''))
-      : '计算中';
+    $('#backupTotalSize').textContent = total > 0 ? sizeLabel(total) : '准备中';
 
     const track = $('#backupProgressTrack');
     const bar = $('#backupProgressBar');
-    if (phase === 'estimating') {
-      $('#backupProgressTitle').textContent = attempt > 1 ? '重试估算 · ' + attemptLabel : '正在估算快照总大小';
-      $('#backupProgressDetail').textContent = '正在扫描并压缩计数；此阶段尚未传输归档数据';
-      $('#backupProgressPercent').textContent = '扫描中';
-      $('#backupSpeed').textContent = '未开始';
-      $('#backupEta').textContent = '估算中';
-      track.setAttribute('aria-busy', 'true');
-      track.removeAttribute('aria-valuenow');
-      bar.style.width = '';
-      return;
-    }
-
     if (phase === 'preparing') {
       $('#backupProgressTitle').textContent = attempt > 1 ? '重试生成服务器快照 · ' + attemptLabel : '正在服务器端生成快照';
       $('#backupProgressDetail').textContent = data.message || '正在把服务器所有文件整理为可断点读取的归档';
@@ -285,9 +270,9 @@
     if (phase === 'transferring') {
       const percent = total > 0 ? Math.min(99, Math.floor(bytes / total * 100)) : 0;
       $('#backupProgressTitle').textContent = '正在传输服务器快照';
-      $('#backupProgressDetail').textContent = overEstimate ? '传输量已超过预估，仍在接收归档数据' : 'SSH 连接 · 第 ' + attemptLabel + ' 次';
-      $('#backupProgressPercent').textContent = overEstimate ? '调整中' : percent + '%';
-      $('#backupEta').textContent = overEstimate ? '大小变化，重新估算中' : etaLabel(data.remainingSeconds);
+      $('#backupProgressDetail').textContent = 'SSH 连接 · 第 ' + attemptLabel + ' 次';
+      $('#backupProgressPercent').textContent = percent + '%';
+      $('#backupEta').textContent = etaLabel(data.remainingSeconds);
       track.setAttribute('aria-valuenow', String(percent));
       bar.style.width = percent + '%';
       return;

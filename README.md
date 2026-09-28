@@ -61,7 +61,8 @@ OpenClaw-Debugger/
 ├── App.xaml(.cs)          # WPF 应用入口
 ├── MainWindow.xaml(.cs)   # WebView2 宿主、消息桥接、操作流程
 ├── Models.cs             # 设置和数据模型
-├── RemoteOpenClawClient.cs # SSH、远程路径校验、文件操作、上传和归档流
+├── RemoteOpenClawClient.cs # SSH 会话、远程路径校验、记忆和表情包操作
+├── RemoteSnapshotClient.cs  # 服务器快照生成、断点传输和清理
 ├── StickerCatalogEditor.cs # 表情包目录格式读取、编辑和同步
 ├── LocalSnapshotStore.cs  # DPAPI 加密的远端文件回滚副本
 ├── LocalServerBackupStore.cs # 整机归档和本机清单写入
@@ -90,7 +91,7 @@ OpenClaw-Debugger/
 - `WebUi/` 是 HTML UI 的唯一界面层；静态资源随构建复制。不要把远程 CDN 作为运行依赖。
 - UI 通过映射到固定来源 `https://openclaw.local` 的 WebView2 页面加载，并通过类型化消息调用宿主功能。
 - `MainWindow.xaml.cs` 是宿主桥接入口。只添加具体、有限的操作，不接受来自 UI 的任意 shell 命令。
-- `RemoteOpenClawClient.cs` 管理 SSH 调用、允许的远程目录、文件校验、上传和归档传输。新增远程功能时应遵循现有路径限制和哈希冲突检查。
+- `RemoteOpenClawClient.cs` 管理复用 SSH 会话、允许的远程目录、文件校验和表情包操作；`RemoteSnapshotClient.cs` 只负责服务器快照生成、断点传输、错误分类和临时文件清理。新增远程功能时应遵循现有路径限制和哈希冲突检查。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
 

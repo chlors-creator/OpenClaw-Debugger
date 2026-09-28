@@ -197,45 +197,6 @@ public sealed class LocalServerBackupStore(string rootDirectory)
         return (bytes / (1024d * 1024 * 1024)).ToString("0.00") + " GiB";
     }
 
-    private static async Task<long> EstimateWithRetryAsync(
-        ConnectionSettings settings,
-        RemoteOpenClawClient remote,
-        IProgress<ServerSnapshotProgress>? progress,
-        BackupPauseController? pauseController,
-        CancellationToken cancellationToken)
-    {
-        for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
-        {
-            try
-            {
-                if (pauseController is not null)
-                    await pauseController.WaitIfPausedAsync(cancellationToken);
-                if (attempt > 1)
-                    progress?.Report(new ServerSnapshotProgress("estimating", 0, null, null, null, attempt, MaximumAttempts));
-                var estimate = await remote.EstimateServerSnapshotSizeAsync(settings, cancellationToken);
-                if (pauseController is not null)
-                    await pauseController.WaitIfPausedAsync(cancellationToken);
-                return estimate;
-            }
-            catch (SnapshotTransferInterruptedException) when (attempt < MaximumAttempts)
-            {
-                var delay = RetryDelay(attempt);
-                progress?.Report(new ServerSnapshotProgress(
-                    "retrying", 0, null, null, null, attempt + 1, MaximumAttempts,
-                    $"估算期间 SSH 连接中断；{delay.TotalSeconds:0} 秒后重试。"));
-                await Task.Delay(delay, cancellationToken);
-                if (pauseController is not null)
-                    await pauseController.WaitIfPausedAsync(cancellationToken);
-            }
-            catch (SnapshotTransferInterruptedException ex)
-            {
-                throw new IOException(
-                    $"估算阶段网络连续中断 {MaximumAttempts} 次；已停止自动重试。{Environment.NewLine}{ex.Message}", ex);
-            }
-        }
-        throw new InvalidOperationException("快照总大小估算未能完成。");
-    }
-
     private static TimeSpan RetryDelay(int failedAttempt)
     {
         var seconds = Math.Min(30, 2 * Math.Pow(2, Math.Max(0, failedAttempt - 1)));

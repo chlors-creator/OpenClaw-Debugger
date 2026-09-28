@@ -45,12 +45,10 @@ body.theme-light .file-row.selected,body.theme-light .sticker-row.selected{backg
 .backup-progress-percent{font:700 11px 'Cascadia Code',Consolas,monospace;color:var(--palette-accent);white-space:nowrap}
 .backup-progress-track{height:7px;overflow:hidden;border-radius:99px;background:color-mix(in srgb,var(--palette-surface) 70%,transparent);border:1px solid var(--line)}
 .backup-progress-track span{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--palette-highlight),var(--palette-accent));box-shadow:0 0 12px color-mix(in srgb,var(--palette-accent) 45%,transparent);transition:width .28s ease}
-.backup-progress[data-phase=estimating] .backup-progress-track span{width:34%;animation:backup-estimating 1.35s ease-in-out infinite}
 .backup-progress-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;color:var(--muted2);font-size:9px}
 .backup-progress-stats span{display:flex;align-items:baseline;gap:5px;min-width:0;white-space:nowrap}
 .backup-progress-stats b{overflow:hidden;text-overflow:ellipsis;color:var(--ink);font:600 10px 'Cascadia Code',Consolas,monospace}
 @keyframes backup-progress-in{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}
-@keyframes backup-estimating{0%{transform:translateX(-115%)}100%{transform:translateX(315%)}}
 @media(max-width:780px){.backup-progress-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.backup-progress-stats span{justify-content:space-between}}
 /* Backup monitor docked to the navigation row. */
 .main-nav{height:80px;min-height:80px;display:flex;align-items:center;gap:8px;overflow:visible;padding:0 4px}
@@ -68,7 +66,8 @@ body.theme-light .file-row.selected,body.theme-light .sticker-row.selected{backg
 .backup-progress-stats span{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0;white-space:nowrap}
 .backup-progress-stats small{font-size:7px;color:var(--muted2)}
 .backup-progress-stats b{max-width:100%;font-size:9px;line-height:1.1}
-.backup-progress[data-phase=retrying] .backup-progress-track span{width:27%;animation:backup-estimating 1.1s ease-in-out infinite}
+.backup-progress[data-phase=retrying] .backup-progress-track span{width:27%;animation:backup-retrying 1.1s ease-in-out infinite}
+@keyframes backup-retrying{0%{transform:translateX(-115%)}100%{transform:translateX(315%)}}
 .backup-progress[data-phase=failed]{border-color:color-mix(in srgb,var(--palette-danger) 50%,transparent)}
 .backup-progress[data-phase=failed] .backup-progress-percent{color:var(--palette-danger)}
 @media(max-width:1050px){.nav-tab{min-width:82px}.backup-progress{width:clamp(310px,40vw,410px)}}

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -12,20 +11,7 @@ namespace OpenClawDebugger;
 public sealed record RemoteStickerUploadResult(string RelativePath, long Size, string Sha256);
 public sealed record RemoteStickerRenameResult(string RelativePath, long Size, string Sha256);
 public sealed record RemoteStickerPairWriteResult(string CatalogSha256, long CatalogSize, string ManifestSha256, long ManifestSize);
-public sealed record ServerSnapshotProgress(
-    string Phase,
-    long Bytes,
-    long? TotalBytes,
-    double? BytesPerSecond,
-    long? RemainingSeconds,
-    int Attempt = 1,
-    int MaxAttempts = 1,
-    string? Message = null);
-
-public sealed class SnapshotTransferInterruptedException(string message, Exception? innerException = null)
-    : IOException(message, innerException);
-
-public sealed class RemoteOpenClawClient : IDisposable
+public sealed partial class RemoteOpenClawClient : IDisposable
 {
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
     private Process? _sessionProcess;
@@ -599,7 +585,7 @@ for line in sys.stdin:
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false)
         };
-        AddSnapshotSshArguments(start, settings);
+        AddSshArguments(start, settings);
         var program64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(UploadStreamProgram));
         start.ArgumentList.Add("python3 -u -c \"import base64;exec(base64.b64decode('" + program64 + "'))\"");
         using var process = new Process { StartInfo = start };
@@ -629,7 +615,7 @@ for line in sys.stdin:
             await process.WaitForExitAsync(timeout.Token);
             var error = await errorTask;
             if (process.ExitCode != 0)
-                throw CreateSnapshotFailure(error, process.ExitCode);
+                throw CreateSshFailure(error, process.ExitCode);
             if (string.IsNullOrWhiteSpace(outputLine)) throw new InvalidOperationException("服务器没有返回上传结果。");
             var response = JsonNode.Parse(outputLine) as JsonObject
                 ?? throw new InvalidOperationException("服务器返回的上传结果无法识别。");
@@ -680,407 +666,7 @@ for line in sys.stdin:
             response["size"]?.GetValue<long>() ?? 0,
             response["sha256"]?.GetValue<string>() ?? expectedSha256);
     }
-    public async Task CreateServerSnapshotAsync(
-        ConnectionSettings settings,
-        string remotePath,
-        BackupPauseController? pauseController = null,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateSettings(settings);
-        ValidateRemoteSnapshotPath(remotePath);
-        if (pauseController is not null) await pauseController.WaitIfPausedAsync(cancellationToken);
-        var start = CreateSnapshotStart(settings, redirectOutput: true);
-        start.ArgumentList.Add("sudo -n tar --create --gzip --file='" + remotePath + "' --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .");
-        using var process = StartProcess(start);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(12));
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-        try
-        {
-            await process.WaitForExitAsync(timeout.Token);
-            _ = await stdoutTask;
-            var error = await stderrTask;
-            if (process.ExitCode != 0) throw CreateSnapshotFailure(error, process.ExitCode);
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new TimeoutException("服务器生成快照超过 12 小时，操作已中止。");
-        }
-        finally
-        {
-            if (!process.HasExited)
-                try { process.Kill(entireProcessTree: true); } catch { }
-        }
-    }
-
-    public async Task<long> GetServerSnapshotSizeAsync(
-        ConnectionSettings settings,
-        string remotePath,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateSettings(settings);
-        ValidateRemoteSnapshotPath(remotePath);
-        var start = CreateSnapshotStart(settings, redirectOutput: true);
-        start.ArgumentList.Add("sudo -n stat -c %s -- '" + remotePath + "'");
-        using var process = StartProcess(start);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMinutes(3));
-        var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-        try
-        {
-            await process.WaitForExitAsync(timeout.Token);
-            var output = await outputTask;
-            var error = await stderrTask;
-            if (process.ExitCode != 0) throw CreateSnapshotFailure(error, process.ExitCode);
-            var text = output.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.Trim();
-            if (!long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var bytes) || bytes <= 0)
-                throw new InvalidDataException("服务器未返回有效的快照大小。");
-            return bytes;
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new TimeoutException("读取服务器快照大小超时。");
-        }
-        finally
-        {
-            if (!process.HasExited)
-                try { process.Kill(entireProcessTree: true); } catch { }
-        }
-    }
-
-    public async Task<RemoteSnapshotTransferResult> ResumeServerSnapshotAsync(
-        ConnectionSettings settings,
-        string remotePath,
-        Stream destination,
-        long offset,
-        long totalBytes,
-        BackupPauseController? pauseController = null,
-        IProgress<ServerSnapshotProgress>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateSettings(settings);
-        ValidateRemoteSnapshotPath(remotePath);
-        if (offset < 0 || totalBytes <= 0 || offset > totalBytes) throw new ArgumentOutOfRangeException(nameof(offset));
-        var start = CreateSnapshotStart(settings, redirectOutput: true);
-        start.ArgumentList.Add("sudo -n tail -c +" + (offset + 1).ToString(CultureInfo.InvariantCulture) + " -- '" + remotePath + "'");
-        using var process = StartProcess(start);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(12));
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-        var buffer = new byte[256 * 1024];
-        var timer = Stopwatch.StartNew();
-        var transferred = offset;
-        var chunkBytes = 0L;
-        var lastReportAt = TimeSpan.Zero;
-        try
-        {
-            if (offset == 0)
-            {
-                var header = new byte[2];
-                var readHeader = 0;
-                while (readHeader < header.Length)
-                {
-                    if (pauseController is not null) await pauseController.WaitIfPausedAsync(timeout.Token);
-                    var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, header.AsMemory(readHeader), timeout.Token);
-                    if (read == 0) throw new SnapshotTransferInterruptedException("服务器快照在读取 gzip 头时提前结束。");
-                    readHeader += read;
-                }
-                if (header[0] != 0x1f || header[1] != 0x8b)
-                    throw new InvalidDataException("远程快照不是 gzip 数据。");
-                await destination.WriteAsync(header, timeout.Token);
-                transferred += header.Length;
-                chunkBytes += header.Length;
-            }
-            while (true)
-            {
-                if (pauseController is not null) await pauseController.WaitIfPausedAsync(timeout.Token);
-                var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, buffer, timeout.Token);
-                if (read == 0) break;
-                if (transferred + read > totalBytes) throw new InvalidDataException("服务器快照大小在传输期间发生变化。");
-                await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
-                transferred += read;
-                chunkBytes += read;
-                var elapsed = timer.Elapsed;
-                if (chunkBytes >= 1024 * 1024 || elapsed - lastReportAt >= TimeSpan.FromMilliseconds(500))
-                {
-                    var speed = elapsed.TotalSeconds > 0 ? chunkBytes / elapsed.TotalSeconds : 0;
-                    var remaining = totalBytes > transferred && speed > 0
-                        ? (long?)Math.Ceiling((totalBytes - transferred) / speed) : null;
-                    progress?.Report(new ServerSnapshotProgress("transferring", transferred, totalBytes, speed, remaining));
-                    chunkBytes = 0;
-                    lastReportAt = elapsed;
-                }
-            }
-            await process.WaitForExitAsync(timeout.Token);
-            var error = await stderrTask;
-            if (process.ExitCode != 0) throw CreateSnapshotFailure(error, process.ExitCode);
-            if (transferred != totalBytes)
-                throw new SnapshotTransferInterruptedException($"服务器快照传输提前结束，已收到 {transferred} / {totalBytes} 字节。");
-            var finalSpeed = timer.Elapsed.TotalSeconds > 0 ? Math.Max(0, transferred - offset) / timer.Elapsed.TotalSeconds : 0;
-            progress?.Report(new ServerSnapshotProgress("transferring", transferred, totalBytes, finalSpeed, 0));
-            return new RemoteSnapshotTransferResult(transferred, "");
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new TimeoutException("服务器快照传输超过 12 小时，操作已中止。");
-        }
-        finally
-        {
-            if (!process.HasExited)
-                try { process.Kill(entireProcessTree: true); } catch { }
-        }
-    }
-
-    public async Task RemoveServerSnapshotAsync(
-        ConnectionSettings settings,
-        string remotePath,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            ValidateSettings(settings);
-            ValidateRemoteSnapshotPath(remotePath);
-            var start = CreateSnapshotStart(settings, redirectOutput: true);
-            start.ArgumentList.Add("sudo -n rm -f -- '" + remotePath + "'");
-            using var process = StartProcess(start);
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromMinutes(3));
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-            await process.WaitForExitAsync(timeout.Token);
-            _ = await stdoutTask;
-            _ = await stderrTask;
-        }
-        catch { }
-    }
-
-    private static void ValidateRemoteSnapshotPath(string remotePath)
-    {
-        if (!Regex.IsMatch(remotePath, @"^/tmp/\.openclaw-debugger-[0-9a-f]{32}\.tar\.gz$"))
-            throw new InvalidDataException("服务器快照临时路径无效。");
-    }
-
-    private static ProcessStartInfo CreateSnapshotStart(ConnectionSettings settings, bool redirectOutput)
-    {
-        var start = new ProcessStartInfo
-        {
-            FileName = "ssh.exe",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = redirectOutput,
-            RedirectStandardError = true,
-            StandardOutputEncoding = new UTF8Encoding(false),
-            StandardErrorEncoding = new UTF8Encoding(false)
-        };
-        AddSnapshotSshArguments(start, settings);
-        return start;
-    }
-
-    private static Process StartProcess(ProcessStartInfo start)
-    {
-        var process = new Process { StartInfo = start };
-        try
-        {
-            if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
-            return process;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            process.Dispose();
-            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
-        }
-    }
-
-    public async Task<long> EstimateServerSnapshotSizeAsync(
-        ConnectionSettings settings,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateSettings(settings);
-        var tarCommand = "sudo -n tar --create --gzip --file=- --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .";
-        var start = new ProcessStartInfo
-        {
-            FileName = "ssh.exe",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = new UTF8Encoding(false),
-            StandardErrorEncoding = new UTF8Encoding(false)
-        };
-        AddSnapshotSshArguments(start, settings);
-        start.ArgumentList.Add("bash -o pipefail -c \"" + tarCommand + " | wc -c\"");
-
-        using var process = new Process { StartInfo = start };
-        try
-        {
-            if (!process.Start())
-                throw new InvalidOperationException("无法启动 Windows OpenSSH。");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
-        }
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(12));
-        var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-        try
-        {
-            await process.WaitForExitAsync(timeout.Token);
-            var output = await outputTask;
-            var error = await stderrTask;
-            if (process.ExitCode != 0)
-                throw CreateSnapshotFailure(error, process.ExitCode);
-
-            var sizeText = output.Trim();
-            if (!long.TryParse(sizeText, NumberStyles.None, CultureInfo.InvariantCulture, out var totalBytes) || totalBytes <= 0)
-                throw new InvalidDataException("服务器未返回有效的快照总大小。请检查 SSH 登录脚本是否向标准输出写入额外内容。");
-            return totalBytes;
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new TimeoutException("服务器快照大小估算超过 12 小时，操作已中止。");
-        }
-        catch (IOException ex) when (ex is not SnapshotTransferInterruptedException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            throw new SnapshotTransferInterruptedException("SSH 连接在估算快照大小时中断。", ex);
-        }
-        finally
-        {
-            if (!process.HasExited)
-                try { process.Kill(entireProcessTree: true); } catch { }
-        }
-    }
-
-    public async Task<RemoteSnapshotTransferResult> WriteServerSnapshotAsync(
-        ConnectionSettings settings,
-        Stream destination,
-        long estimatedTotalBytes,
-        BackupPauseController? pauseController = null,
-        IProgress<ServerSnapshotProgress>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateSettings(settings);
-        var start = new ProcessStartInfo
-        {
-            FileName = "ssh.exe",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = new UTF8Encoding(false),
-            StandardErrorEncoding = new UTF8Encoding(false)
-        };
-        AddSnapshotSshArguments(start, settings);
-        start.ArgumentList.Add("sudo -n tar --create --gzip --file=- --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .");
-
-        using var process = new Process { StartInfo = start };
-        try
-        {
-            if (!process.Start())
-                throw new InvalidOperationException("无法启动 Windows OpenSSH。");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
-        }
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(12));
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[256 * 1024];
-        var timer = Stopwatch.StartNew();
-        long transferred = 0;
-        long lastReported = 0;
-        var lastReportAt = TimeSpan.Zero;
-        try
-        {
-            var gzipHeader = new byte[2];
-            var headerRead = 0;
-            while (headerRead < gzipHeader.Length)
-            {
-                if (pauseController is not null)
-                    await pauseController.WaitIfPausedAsync(timeout.Token);
-                var read = await ReadSnapshotOutputAsync(
-                    process.StandardOutput.BaseStream, gzipHeader.AsMemory(headerRead), timeout.Token);
-                if (read == 0)
-                {
-                    await process.WaitForExitAsync(timeout.Token);
-                    var headerError = await stderrTask;
-                    if (process.ExitCode != 0)
-                        throw CreateSnapshotFailure(headerError, process.ExitCode);
-                    throw new InvalidDataException("服务器没有返回完整的 gzip 快照头。");
-                }
-                headerRead += read;
-            }
-            if (gzipHeader[0] != 0x1f || gzipHeader[1] != 0x8b)
-                throw new InvalidDataException("SSH 标准输出不是 gzip 快照数据；请检查服务器登录脚本是否向标准输出写入文本。");
-            await destination.WriteAsync(gzipHeader, timeout.Token);
-            hash.AppendData(gzipHeader);
-            transferred = gzipHeader.Length;
-
-            while (true)
-            {
-                if (pauseController is not null)
-                    await pauseController.WaitIfPausedAsync(timeout.Token);
-                var read = await ReadSnapshotOutputAsync(process.StandardOutput.BaseStream, buffer, timeout.Token);
-                if (read == 0) break;
-                await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
-                hash.AppendData(buffer, 0, read);
-                transferred += read;
-                var elapsed = timer.Elapsed;
-                if (transferred - lastReported >= 1024 * 1024 || elapsed - lastReportAt >= TimeSpan.FromMilliseconds(500))
-                {
-                    var bytesPerSecond = elapsed.TotalSeconds > 0 ? transferred / elapsed.TotalSeconds : 0;
-                    long? remainingSeconds = estimatedTotalBytes > transferred && bytesPerSecond > 0
-                        ? (long)Math.Ceiling((estimatedTotalBytes - transferred) / bytesPerSecond)
-                        : null;
-                    progress?.Report(new ServerSnapshotProgress("transferring", transferred, estimatedTotalBytes, bytesPerSecond, remainingSeconds));
-                    lastReported = transferred;
-                    lastReportAt = elapsed;
-                }
-            }
-
-            await process.WaitForExitAsync(timeout.Token);
-            var error = await stderrTask;
-            if (process.ExitCode != 0)
-            {
-                throw CreateSnapshotFailure(error, process.ExitCode);
-            }
-
-            if (transferred == 0)
-                throw new InvalidDataException("服务器没有返回快照数据。");
-            var finalSpeed = timer.Elapsed.TotalSeconds > 0 ? transferred / timer.Elapsed.TotalSeconds : 0;
-            progress?.Report(new ServerSnapshotProgress("finalizing", transferred, transferred, finalSpeed, 0));
-            return new RemoteSnapshotTransferResult(
-                transferred, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new TimeoutException("服务器快照超过 12 小时，传输已中止。");
-        }
-        finally
-        {
-            if (!process.HasExited)
-                try { process.Kill(entireProcessTree: true); } catch { }
-        }
-    }
-    private static void AddSnapshotSshArguments(ProcessStartInfo start, ConnectionSettings settings)
+    private static void AddSshArguments(ProcessStartInfo start, ConnectionSettings settings)
     {
         start.ArgumentList.Add("-T");
         start.ArgumentList.Add("-o");
@@ -1100,7 +686,7 @@ for line in sys.stdin:
         start.ArgumentList.Add(settings.Target);
     }
 
-    private static Exception CreateSnapshotFailure(string error, int exitCode)
+    private static Exception CreateSshFailure(string error, int exitCode)
     {
         var detail = string.Join(Environment.NewLine,
             error.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Take(8));
@@ -1136,17 +722,6 @@ for line in sys.stdin:
         return transientMessages.Any(message => detail.Contains(message, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static async Task<int> ReadSnapshotOutputAsync(Stream source, Memory<byte> buffer, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await source.ReadAsync(buffer, cancellationToken);
-        }
-        catch (IOException ex)
-        {
-            throw new SnapshotTransferInterruptedException("SSH 数据流在传输服务器快照时中断。", ex);
-        }
-    }
 
     private async Task<JsonObject> InvokeAsync(
         ConnectionSettings settings, JsonObject request, CancellationToken cancellationToken)
@@ -1208,7 +783,7 @@ for line in sys.stdin:
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false)
         };
-        AddSnapshotSshArguments(start, settings);
+        AddSshArguments(start, settings);
         var program64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(PythonProgram));
         start.ArgumentList.Add("python3 -u -c \"import base64;exec(base64.b64decode('" + program64 + "'))\"");
         var process = new Process { StartInfo = start };
@@ -1280,4 +855,3 @@ for line in sys.stdin:
 }
 
 public sealed class RemoteConflictException(string message) : InvalidOperationException(message);
-public sealed record RemoteSnapshotTransferResult(long Bytes, string Sha256);
