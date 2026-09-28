@@ -16,7 +16,7 @@ public static class SettingsRepository
     {
         var settings = new UserSettings { PrivateDirectory = DefaultPrivateDirectory };
         Directory.CreateDirectory(settings.PrivateDirectory);
-        foreach (var name in new[] { "Rollback", "Exports", "Secrets" })
+        foreach (var name in new[] { "Rollback", "Exports", "Secrets", "ThumbnailCache" })
             Directory.CreateDirectory(Path.Combine(settings.PrivateDirectory, name));
 
         var path = Path.Combine(settings.PrivateDirectory, "settings.json");

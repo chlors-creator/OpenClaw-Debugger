@@ -1,8 +1,10 @@
 using Microsoft.Web.WebView2.Core;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -25,6 +27,7 @@ public partial class MainWindow : Window
     private const int StickerUploadLimit = 16 * 1024 * 1024;
     private const int StickerUploadChunkLimit = 192 * 1024;
     private const int StickerThumbnailEdge = 256;
+    private const long StickerThumbnailPersistentCacheLimit = 128L * 1024 * 1024;
     private UserSettings _settings = new();
     private LocalSnapshotStore? _snapshots;
     private IReadOnlyList<RemoteFile> _files = [];
@@ -335,17 +338,143 @@ public partial class MainWindow : Window
         var path = payload.GetProperty("path").GetString() ?? "";
         var file = _files.FirstOrDefault(x => x.Root == "stickers" && x.IsImage && x.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidDataException("图片不在本次扫描的表情包目录内。");
+
+        var cachePath = GetStickerThumbnailCachePath(file);
+        var cached = await ReadStickerThumbnailCacheAsync(cachePath);
+        if (cached is not null)
+        {
+            return new
+            {
+                path,
+                dataUrl = cached.DataUrl,
+                size = cached.Size,
+                originalSize = cached.OriginalSize,
+                thumbnailEdge = StickerThumbnailEdge,
+                cacheHit = true
+            };
+        }
+
         var content = await _remote.ReadAsync(_settings.Connection, file);
         var original = content.Binary ?? throw new InvalidDataException("服务器返回的图片数据为空。");
         var thumbnail = await Task.Run(() => CreateStickerThumbnail(original, path));
+        var cacheEntry = new CachedStickerThumbnail(thumbnail.DataUrl, thumbnail.Size, content.Size, StickerThumbnailEdge);
+        await WriteStickerThumbnailCacheAsync(cachePath, cacheEntry);
         return new
         {
             path,
             dataUrl = thumbnail.DataUrl,
             size = thumbnail.Size,
             originalSize = content.Size,
-            thumbnailEdge = StickerThumbnailEdge
+            thumbnailEdge = StickerThumbnailEdge,
+            cacheHit = false
         };
+    }
+
+    private string GetStickerThumbnailCachePath(RemoteFile file)
+    {
+        var fingerprint = string.Join("\0",
+            file.Key,
+            file.Size.ToString(CultureInfo.InvariantCulture),
+            (file.ModifiedUtc?.UtcDateTime.Ticks ?? 0).ToString(CultureInfo.InvariantCulture),
+            file.Sha256);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint))).ToLowerInvariant();
+        return Path.Combine(_settings.PrivateDirectory, "ThumbnailCache", "thumb-" + hash + ".json");
+    }
+
+    private static async Task<CachedStickerThumbnail?> ReadStickerThumbnailCacheAsync(string cachePath)
+    {
+        try
+        {
+            if (!File.Exists(cachePath)) return null;
+            CachedStickerThumbnail? cached;
+            await using (var stream = new FileStream(cachePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                cached = await JsonSerializer.DeserializeAsync<CachedStickerThumbnail>(stream, JsonOptions);
+            }
+            if (cached is null || cached.ThumbnailEdge != StickerThumbnailEdge || cached.Size <= 0 ||
+                cached.OriginalSize < 0 || string.IsNullOrWhiteSpace(cached.DataUrl))
+            {
+                TryDeleteStickerThumbnailCacheFile(cachePath);
+                return null;
+            }
+
+            try { File.SetLastAccessTimeUtc(cachePath, DateTime.UtcNow); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return cached;
+        }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+        catch (JsonException)
+        {
+            TryDeleteStickerThumbnailCacheFile(cachePath);
+            return null;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private static async Task WriteStickerThumbnailCacheAsync(string cachePath, CachedStickerThumbnail cache)
+    {
+        var directory = Path.GetDirectoryName(cachePath);
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        var temporaryPath = Path.Combine(directory, ".thumb-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(cache, JsonOptions);
+            await File.WriteAllBytesAsync(temporaryPath, bytes);
+            File.Move(temporaryPath, cachePath, overwrite: true);
+            TrimStickerThumbnailCache(directory);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        finally
+        {
+            TryDeleteStickerThumbnailCacheFile(temporaryPath);
+        }
+    }
+
+    private static void TrimStickerThumbnailCache(string directory)
+    {
+        try
+        {
+            if (!Directory.Exists(directory)) return;
+            var files = Directory.EnumerateFiles(directory, "thumb-*.json")
+                .Select(path => new FileInfo(path))
+                .Where(file => file.Exists)
+                .OrderBy(file => file.LastAccessTimeUtc)
+                .ThenBy(file => file.LastWriteTimeUtc)
+                .ToList();
+            long total = files.Sum(file => file.Length);
+            foreach (var file in files)
+            {
+                if (total <= StickerThumbnailPersistentCacheLimit) break;
+                try
+                {
+                    var length = file.Length;
+                    file.Delete();
+                    total = Math.Max(0, total - length);
+                }
+                catch (FileNotFoundException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+        catch (DirectoryNotFoundException) { }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void TryDeleteStickerThumbnailCacheFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static (string DataUrl, long Size) CreateStickerThumbnail(byte[] bytes, string path)
@@ -948,6 +1077,7 @@ public partial class MainWindow : Window
     private sealed record BridgeRequest(string Id, string Command, JsonElement Payload);
     private sealed record BridgeResponse(string Id, bool Ok, object? Data, string? Error);
     private sealed record BridgeEvent(string Type, string Command, object Data);
+    private sealed record CachedStickerThumbnail(string DataUrl, long Size, long OriginalSize, int ThumbnailEdge);
     private static void ValidateStickerWeight(double weight)
     {
         if (!double.IsFinite(weight) || weight < 0 || weight > 1_000_000)
