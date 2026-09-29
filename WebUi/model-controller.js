@@ -40,10 +40,12 @@
       if (!Number.isFinite(latency))
         return { label: '测试失败', className: 'latency-failed', title: error };
       const measurement = String(model.latencyMeasurement || '');
-      const prefix = measurement === 'first_event' ? '首响应 ' : measurement === 'complete' ? '完整 ' : '';
-      const measurementTitle = measurement === 'first_event'
-        ? '首个流式事件，不等待完整回复'
-        : measurement === 'complete' ? '完整响应耗时' : '';
+      const prefix = measurement === 'first_event' || measurement === 'gateway_first_event' ? '首响应 ' : measurement === 'complete' ? '完整 ' : '';
+      const measurementTitle = measurement === 'gateway_first_event'
+        ? '通过 OpenClaw Gateway 测得首个流式事件，不等待完整回复'
+        : measurement === 'first_event'
+          ? '直接通过模型接口测得首个流式事件，不等待完整回复'
+          : measurement === 'complete' ? '完整响应耗时' : '完整 OpenClaw CLI 进程耗时';
       if (latency <= 200)
         return { label: prefix + latency + ' ms', className: 'latency-fast', title: measurementTitle || '200 ms 以内' };
       if (latency <= 500)
