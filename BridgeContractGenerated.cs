@@ -48,7 +48,7 @@ internal static class BridgeContractGenerated
             {
                 Mode = "remote",
                 Domain = "connection",
-                TimeoutMs = 600000,
+                TimeoutMs = 60000,
                 Payload = new Dictionary<string, string>(StringComparer.Ordinal)
                 {
                 }

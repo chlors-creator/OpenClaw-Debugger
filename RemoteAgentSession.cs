@@ -87,9 +87,9 @@ internal sealed class RemoteAgentSession : IDisposable
         await _sessionGate.WaitAsync(cancellationToken);
         try
         {
-            var process = await EnsureSessionAsync(settings, cancellationToken);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(operationTimeout ?? TimeSpan.FromMinutes(3));
+            var process = await EnsureSessionAsync(settings, timeout.Token);
             var input = process.StandardInput.BaseStream;
             await WriteAsync(input, Encoding.ASCII.GetBytes(payload + "\n"), timeout.Token);
             if (requestBody is { } body && !body.IsEmpty)
@@ -144,19 +144,13 @@ internal sealed class RemoteAgentSession : IDisposable
         }
     }
 
-    private Task<Process> EnsureSessionAsync(ConnectionSettings settings, CancellationToken cancellationToken)
+    private async Task<Process> EnsureSessionAsync(ConnectionSettings settings, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        // 会话创建不在这里隐式重试，避免与 InvokeCoreAsync 的指数退避叠加。
-        // 只读请求由外层按 1、2、4、8、16 秒重试，总等待为 31 秒。
-        return Task.FromResult(EnsureSession(settings));
-    }
-
-    private Process EnsureSession(ConnectionSettings settings)
-    {
         var key = settings.Target + ":" + settings.Port.ToString(CultureInfo.InvariantCulture) + "|" + settings.WorkspacePath + "|" + settings.StickersPath;
         if (_sessionProcess is not null && !_sessionProcess.HasExited && string.Equals(_sessionKey, key, StringComparison.Ordinal))
             return _sessionProcess;
+
         ResetSession();
         var start = new ProcessStartInfo
         {
@@ -178,9 +172,18 @@ internal sealed class RemoteAgentSession : IDisposable
         {
             if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
             errorTask = process.StandardError.ReadToEndAsync();
-            SshCommandRunner.WritePythonBootstrap(process.StandardInput.BaseStream, RemoteAgentProgram.Main);
+            await SshCommandRunner.WritePythonBootstrapAsync(
+                process.StandardInput.BaseStream,
+                RemoteAgentProgram.Main,
+                cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            process.Dispose();
+            throw;
+        }
+        catch (Exception ex)
         {
             var stderr = SshCommandRunner.ReadStartupError(process, errorTask);
             var failure = SshCommandRunner.CreateStartupFailure(process, start.FileName, stderr, ex);

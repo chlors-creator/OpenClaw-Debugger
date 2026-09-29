@@ -35,7 +35,7 @@
     "connect": {
       "mode": "remote",
       "domain": "connection",
-      "timeoutMs": 600000,
+      "timeoutMs": 60000,
       "payload": {}
     },
     "disconnect": {

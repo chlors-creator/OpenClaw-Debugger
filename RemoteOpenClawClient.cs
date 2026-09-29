@@ -34,7 +34,13 @@ public sealed partial class RemoteOpenClawClient : IDisposable
     public async Task<IReadOnlyList<RemoteFile>> ConnectAndListAsync(
         ConnectionSettings settings, CancellationToken cancellationToken = default)
     {
-        var response = await _session.InvokeAsync(settings, new JsonObject { ["action"] = "inventory" }, cancellationToken);
+        // 连接阶段只需完成 SSH 握手和一次受限清单读取；使用独立短超时，
+        // 避免连接按钮长时间占用整个页面的操作闸门。
+        var response = await _session.InvokeAsync(
+            settings,
+            new JsonObject { ["action"] = "inventory" },
+            cancellationToken,
+            TimeSpan.FromSeconds(45));
         var files = new List<RemoteFile>();
         foreach (var node in response["files"]?.AsArray() ?? new JsonArray())
         {
@@ -62,7 +68,11 @@ public sealed partial class RemoteOpenClawClient : IDisposable
             ["root"] = file.Root,
             ["path"] = file.RelativePath
         };
-        var binaryResponse = await _session.InvokeBinaryAsync(settings, request, cancellationToken: cancellationToken);
+        var binaryResponse = await _session.InvokeBinaryAsync(
+            settings,
+            request,
+            cancellationToken: cancellationToken,
+            operationTimeout: TimeSpan.FromSeconds(45));
         var response = binaryResponse.Metadata;
         var isBinary = response["binary"]?.GetValue<bool>() ?? false;
         var raw = binaryResponse.Data;
