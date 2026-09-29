@@ -8,6 +8,10 @@ import base64, hashlib, json, os, re, stat, subprocess, sys, tempfile, time, soc
 import urllib.error, urllib.parse, urllib.request
 from pathlib import PurePosixPath
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+try:
+    import sqlite3
+except ImportError:
+    sqlite3 = None
 
 P = {}
 ROOTS = {}
@@ -19,6 +23,9 @@ MODEL_GATEWAY = None
 MODEL_PROVIDER_CACHE = None
 MODEL_PROVIDER_CACHE_AT = 0.0
 MODEL_PROVIDER_CACHE_TTL = 60.0
+MODEL_AUTH_CACHE = None
+MODEL_AUTH_CACHE_AT = 0.0
+MODEL_AUTH_CACHE_TTL = 60.0
 ROOT_DOCS = {"MEMORY.md", "USER.md", "AGENTS.md", "SOUL.md", "DREAMS.md"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_TEXT = 4 * 1024 * 1024
@@ -800,6 +807,99 @@ def models_add():
     # 配置已改变，不能返回旧清单。
     print(json.dumps(models_inventory_core(force=True), ensure_ascii=False, separators=(",", ":")))
 
+def auth_store_paths():
+    state_dir = os.environ.get("OPENCLAW_STATE_DIR", "").strip() or "~/.openclaw"
+    state_dir = os.path.abspath(os.path.expanduser(state_dir))
+    config = openclaw_config()
+    agents = config.get("agents") if isinstance(config.get("agents"), dict) else {}
+    defaults = agents.get("defaults") if isinstance(agents.get("defaults"), dict) else {}
+    system_agent = defaults.get("systemAgent") if isinstance(defaults.get("systemAgent"), dict) else {}
+    agent_id = str(system_agent.get("agentId") or "main")
+    paths = []
+    configured_agent_dir = os.environ.get("OPENCLAW_AGENT_DIR", "").strip()
+    if configured_agent_dir:
+        paths.append(os.path.join(os.path.abspath(os.path.expanduser(configured_agent_dir)), "openclaw-agent.sqlite"))
+    entries = agents.get("entries") if isinstance(agents.get("entries"), dict) else {}
+    entry = entries.get(agent_id) if isinstance(entries.get(agent_id), dict) else {}
+    entry_agent_dir = entry.get("agentDir") if isinstance(entry, dict) else None
+    if isinstance(entry_agent_dir, str) and entry_agent_dir.strip():
+        paths.append(os.path.join(os.path.abspath(os.path.expanduser(entry_agent_dir.strip())), "openclaw-agent.sqlite"))
+    paths.append(os.path.join(state_dir, "agents", agent_id, "agent", "openclaw-agent.sqlite"))
+    if agent_id != "main":
+        paths.append(os.path.join(state_dir, "agents", "main", "agent", "openclaw-agent.sqlite"))
+    paths.append(os.path.join(state_dir, "state", "openclaw.sqlite"))
+    return list(dict.fromkeys(paths))
+
+def load_auth_profiles():
+    profiles = {}
+    if sqlite3 is None: return profiles
+    for path in auth_store_paths():
+        if not os.path.isfile(path):
+            continue
+        connection = None
+        try:
+            connection = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=0.5)
+            rows = connection.execute("select store_json from auth_profile_store").fetchall()
+            for row in rows:
+                try: value = json.loads(row[0]) if isinstance(row[0], str) else None
+                except (TypeError, ValueError): value = None
+                if not isinstance(value, dict):
+                    continue
+                candidates = value.get("profiles") if isinstance(value.get("profiles"), dict) else value
+                if not isinstance(candidates, dict):
+                    continue
+                for profile_id, profile in candidates.items():
+                    if isinstance(profile_id, str) and isinstance(profile, dict):
+                        # Agent-local stores intentionally override shared profiles.
+                        profiles.setdefault(profile_id, profile)
+        except (OSError, sqlite3.Error):
+            pass
+        finally:
+            if connection is not None:
+                try: connection.close()
+                except Exception: pass
+    return profiles
+
+def secret_ref_value(value):
+    if isinstance(value, str) and value.strip(): return value.strip()
+    if not isinstance(value, dict): return None
+    if str(value.get("source") or "").lower() != "env": return None
+    env_name = value.get("id")
+    if not isinstance(env_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name): return None
+    resolved = os.environ.get(env_name, "")
+    if not resolved:
+        config = openclaw_config()
+        env = config.get("env") if isinstance(config.get("env"), dict) else {}
+        values = env.get("vars") if isinstance(env.get("vars"), dict) else {}
+        configured = values.get(env_name)
+        if isinstance(configured, str): resolved = configured
+    return resolved.strip() or None
+
+def model_auth_key(provider):
+    global MODEL_AUTH_CACHE, MODEL_AUTH_CACHE_AT
+    now = time.monotonic()
+    if MODEL_AUTH_CACHE is None or now - MODEL_AUTH_CACHE_AT >= MODEL_AUTH_CACHE_TTL:
+        MODEL_AUTH_CACHE = load_auth_profiles()
+        MODEL_AUTH_CACHE_AT = now
+    config = openclaw_config()
+    auth = config.get("auth") if isinstance(config.get("auth"), dict) else {}
+    order = auth.get("order") if isinstance(auth.get("order"), dict) else {}
+    preferred = order.get(provider) if isinstance(order.get(provider), list) else []
+    profile_ids = [item for item in preferred if isinstance(item, str)]
+    profile_ids.extend(item for item in MODEL_AUTH_CACHE if item not in profile_ids)
+    for profile_id in profile_ids:
+        profile = MODEL_AUTH_CACHE.get(profile_id)
+        if not isinstance(profile, dict): continue
+        profile_provider = str(profile.get("provider") or (profile_id.split(":", 1)[0] if ":" in profile_id else ""))
+        if profile_provider != provider: continue
+        key = secret_ref_value(profile.get("key"))
+        if key is None: key = secret_ref_value(profile.get("apiKey"))
+        if key is None: key = secret_ref_value(profile.get("token"))
+        if key is None: key = secret_ref_value(profile.get("keyRef"))
+        if key is None: key = secret_ref_value(profile.get("tokenRef"))
+        if key is not None: return key
+    return None
+
 def model_provider_config(ref):
     # 返回可安全直接探测的 OpenAI-compatible 配置；密钥只留在远程进程内。
     global MODEL_PROVIDER_CACHE, MODEL_PROVIDER_CACHE_AT
@@ -818,7 +918,7 @@ def model_provider_config(ref):
         return None
     api = str(value.get("api") or "").lower()
     base_url = value.get("baseUrl")
-    api_key = value.get("apiKey") or value.get("key")
+    api_key = secret_ref_value(value.get("apiKey")) or secret_ref_value(value.get("key")) or model_auth_key(provider)
     if api not in ("openai-completions", "openai-chat-completions"):
         return None
     if not isinstance(base_url, str) or not re.match(r"^https?://", base_url, re.I):
@@ -883,7 +983,7 @@ def gateway_model_probe(ref):
         try: detail = error.read(512).decode("utf-8", "replace")
         except Exception: pass
         # 未开启兼容端点时交给 direct/CLI 回退；认证和模型错误应直接展示。
-        if error.code in (404, 405, 501): return None
+        if error.code in (401, 403, 404, 405, 501): return None
         return {"success": False, "latencyMs": None, "error": redact_cli_error("Gateway HTTP " + str(error.code) + (": " + detail if detail else "")), "measurement": "gateway_first_event"}
     except (urllib.error.URLError, TimeoutError, OSError):
         # Gateway HTTP 兼容端点可能未启用，不把连接失败误报为模型失败。

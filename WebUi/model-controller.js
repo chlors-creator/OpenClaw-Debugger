@@ -45,7 +45,8 @@
         ? '通过 OpenClaw Gateway 测得首个流式事件，不等待完整回复'
         : measurement === 'first_event'
           ? '直接通过模型接口测得首个流式事件，不等待完整回复'
-          : measurement === 'complete' ? '完整响应耗时' : '完整 OpenClaw CLI 进程耗时';
+          : measurement === 'complete' ? '完整响应耗时'
+            : measurement === 'cli_full' ? '完整 OpenClaw CLI 进程耗时' : '';
       if (latency <= 200)
         return { label: prefix + latency + ' ms', className: 'latency-fast', title: measurementTitle || '200 ms 以内' };
       if (latency <= 500)

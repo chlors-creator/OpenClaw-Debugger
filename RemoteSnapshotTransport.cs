@@ -31,7 +31,12 @@ public sealed class RemoteSnapshotTransport
         ValidateRemoteSnapshotPath(remotePath);
         if (pauseController is not null) await pauseController.WaitIfPausedAsync(cancellationToken);
         var start = CreateSnapshotStart(settings, redirectOutput: true);
-        start.ArgumentList.Add("sudo -n tar --create --gzip --file='" + remotePath + "' --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .");
+        // The archive lives under /tmp while tar walks /. Exclude that exact output file so
+        // tar never reads its own growing gzip stream. Run at idle I/O/CPU priority to keep
+        // SSH and the Gateway responsive on small cloud disks.
+        var archiveRelativePath = "./" + remotePath.TrimStart('/');
+        var tarCommand = "sudo -n tar --create --gzip --file='" + remotePath + "' --numeric-owner --acls --xattrs --xattrs-include='*' --sparse --exclude='" + archiveRelativePath + "' --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run -C / .";
+        start.ArgumentList.Add("if command -v ionice >/dev/null 2>&1; then ionice -c3 nice -n 19 " + tarCommand + "; else nice -n 19 " + tarCommand + "; fi");
         using var process = StartProcess(start);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromHours(12));
