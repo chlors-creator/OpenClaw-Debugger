@@ -4,6 +4,11 @@ obj/
 *.user
 *.suo
 *.pdb
+*.log
+*.dmp
+*.tmp
+*.bak
+*.swp
 *.pem
 *.ppk
 *.key
@@ -13,3 +18,38 @@ id_rsa
 id_ed25519
 id_ecdsa
 Secrets/
+
+# Codex-only notes and local/private project state
+Codex-readme.md
+OpenClaw-Debugger-Private/
+OpenClaw-Server-Backup/
+**/OpenClaw-Debugger-Private/
+**/OpenClaw-Server-Backup/
+settings.json
+settings.local.json
+appsettings.local.json
+*.local.json
+.env
+.env.*
+!.env.example
+
+# SSH material and local client state
+.ssh/
+known_hosts
+*.secret
+*.secrets
+*.token
+*.credentials
+*.config.local
+
+# Exported archives, logs, caches, and generated previews
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+Exports/
+Logs/
+Rollback/
+UploadStaging/
+ThumbnailCache/

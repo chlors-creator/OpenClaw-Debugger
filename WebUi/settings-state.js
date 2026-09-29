@@ -4,11 +4,11 @@
     create() {
       return {
         value: {
-          host: '106.14.173.90',
-          username: 'admin',
+          host: '',
+          username: '',
           port: 22,
-          workspacePath: '/home/admin/.openclaw/workspace',
-          stickersPath: '/home/admin/.openclaw/workspace/stickers',
+          workspacePath: '/home/user/.openclaw/workspace',
+          stickersPath: '/home/user/.openclaw/workspace/stickers',
           backupRetentionCount: 5
         },
         themeController: null,

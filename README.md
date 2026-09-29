@@ -1,254 +1,148 @@
 # OpenClaw Debugger
 
-OpenClaw Debugger 是一个运行在 Windows 上的本地桌面管理工具，用于查看和维护 OpenClaw 服务器中的记忆文件、表情包及其标签，并把服务器根文件系统归档到本机。项目目前采用 HTML/CSS/JavaScript 界面 + WPF WebView2 宿主 + C# 本地服务的结构。
+OpenClaw Debugger 是一个面向 Windows 的桌面管理工具，用于查看和维护 OpenClaw 服务器上的记忆、表情包目录与模型配置，并创建服务器文件快照。
 
-## 项目目标与当前范围
+项目采用 WPF/C# 宿主 + WebView2 HTML/CSS/JavaScript 界面。远程操作通过 Windows OpenSSH 连接服务器，凭据和本机私有数据不会写入仓库。
 
-- 在桌面应用中连接 OpenClaw 服务器，查看工作区记忆 Markdown 和表情包目录。
-- 编辑记忆内容、表情包标签和权重，并安全上传、预览、重命名图片。
-- 查看当前模型、备选模型和上次延迟；拖拽模型列表后自动把新顺序写入服务器配置。
-- 管理主题和界面颜色，以及背景模糊、泛白和可见度。
-- 把服务器 `/` 归档为本机 tar.gz，并在私密目录生成校验清单。
-- 对远程路径和可执行操作设定明确边界；本项目不是通用 SSH 终端，也没有整机快照恢复界面。
+## 功能
 
-## 已实现功能
+- **连接与概览**
+  - 保存 SSH 主机、端口、用户名和 OpenClaw 工作区路径。
+  - 打开应用后自动读取仓库外的本机设置；连接状态、重连和断开操作有明确反馈。
+  - 远程操作统一经过桥接协议，带参数校验、超时和取消支持。
 
-### 连接、记忆与写入保护
+- **记忆**
+  - 浏览服务器工作区中的记忆文件。
+  - 编辑、保存和刷新文件内容。
+  - 保存前进行内容校验，支持冲突检测和本地回滚快照。
 
-- 默认连接 `admin@106.14.173.90:22`，工作区为 `/home/admin/.openclaw/workspace`，表情包目录为 `/home/admin/.openclaw/workspace/stickers`。
-- 应用启动并读取本机设置后会自动连接服务器；连接成功时顶部按钮显示“已连接”，悬停会切换为“断开连接”。点击后会关闭复用 SSH 会话并清空当前远程数据，按钮恢复为“连接服务器”，之后仍可重新连接。
-- 使用 Windows OpenSSH 客户端，并沿用当前 Windows 用户的 SSH 登录环境。程序优先解析 `C:\Windows\System32\OpenSSH\ssh.exe`，再检查 Git OpenSSH 和 PATH；也可用环境变量 `OPENCLAW_SSH_PATH` 指定客户端位置。用户确认在目标机器上 `ssh admin@106.14.173.90` 可以直接连接；不在仓库保存或要求输入私钥。
-- 读取工作区 Markdown、记忆目录内容、表情包目录清单和图片。远程可读写路径由客户端代码限制，不允许用路径穿越访问范围外文件。
-- 编辑记忆时先展示差异，保存前重新读取远端并比较 SHA-256，发现内容已变化则拒绝覆盖。
-- 写远端文件前把原内容保存到本机回滚目录，并使用 Windows DPAPI 保护。
+- **表情包**
+  - 支持 PNG、JPG、JPEG、GIF、WEBP、BMP 等图片格式。
+  - 拖拽或选择本地文件上传，分块传输，支持暂停、取消、失败重试和断点续传。
+  - GIF 在预览中播放；图片目录显示固定尺寸缩略图，缩略图会持久化缓存。
+  - 支持重命名、标签编辑、权重调整和目录自动登记。
+  - 目录文件与说明文件事务写入，出现错误时回滚。
 
-### 表情包
+- **模型**
+  - 显示当前模型、备选模型和上次延迟测试结果。
+  - 测试模型延迟、添加新模型。
+  - 拖拽调整备选模型顺序，顺序变化会自动写入服务器配置，不需要额外的保存按钮。
 
-- 支持 PNG、JPG/JPEG、GIF、WEBP、BMP；GIF 可播放。
-- 图片目录提供固定 256px 边界框缩略图；列表只请求并缓存缩略图，点击预览时才请求原图。缩略图会同时持久化到私密目录 `ThumbnailCache`，缓存键包含远端路径、文件大小、修改时间和可用哈希，远端文件变化后自动生成新版本；原图和缩略图仍带容量上限的 LRU 缓存，切换回来不会重复读取。
-- 可从文件选择器或拖放上传；单张上限 16 MiB。上传后自动更新远端目录登记。
-- 上传支持明确的“取消上传”按钮；界面显示当前文件、分块序号、整体速度和预计剩余时间。每块失败会自动重试，应用启动时会清理 `UploadStaging` 中上次异常退出留下的未完成上传。
-- 支持重命名图片，并同步维护目录及引用；拒绝同名覆盖。
-- 每张表情包有默认值为 `1` 的选择权重，写入目录数据。应用端按表情包适配的模型清单格式保留/更新相应权重字段。
-- 标签编辑会先预览变更，再以服务器端锁、SHA-256 前置校验、临时文件和目录 fsync 事务写入 `catalog.json` 与 `MANIFEST.md`（依据服务器现存清单格式处理）；第二个文件写入失败时会尝试回滚第一个文件。
+- **主题**
+  - 切换界面主题，调整背景泛白、模糊和界面颜色。
+  - 支持 Atri、洛茜等背景主题以及 GIF/图片预览效果。
 
-### 主题
+- **服务器备份**
+  - 在服务器端生成根文件系统的 tar.gz 快照，默认排除 `/proc`、`/sys`、`/dev` 和 `/run`。
+  - 显示总大小、已传输大小、速度、预计剩余时间、重试次数和当前阶段。
+  - 支持暂停、继续、取消、网络中断后从临时文件继续传输。
+  - 完成后校验 gzip、计算 SHA-256，并通过临时目录和原子移动提交快照。
+  - 支持保留数量设置和启动时清理残留临时目录。
 
-- 当前主题：`Atri`、`洛茜`、`浅色`。Atri 与洛茜使用项目内置背景图。
-- 主题页提供背景模糊程度、泛白程度、背景图可见度和 16 项界面颜色调整；颜色按主题保存在本机浏览器的 localStorage，主题名称由本机设置保存。
-- Atri 和洛茜背景资源位于 `Assets/Backgrounds/`，构建时复制到 Web UI 资源目录。
+## 技术栈
 
-### 模型
+- .NET 10（Windows）
+- WPF
+- Microsoft WebView2
+- HTML、CSS、原生 JavaScript
+- Windows OpenSSH Client
+- 远程端：Python 3、tar、gzip、stat、tail，以及 OpenClaw CLI（模型功能需要）
 
-- 导航顺序为“概览 → 记忆 → 模型 → 表情包 → 主题 → 设置”。模型页读取服务器 `openclaw models status/list --json` 的当前模型、备选模型和可用目录。
-- 当前模型和备选模型按一条有序列表显示；拖动行首手柄调整顺序，松开鼠标后立即调用服务器的 `openclaw models set` 与 `openclaw models fallbacks` 命令自动保存，不提供额外的“保存顺序”按钮。保存失败会恢复原顺序。
-- “测试延迟”逐个使用 `openclaw infer model run --local` 发送固定的最小探测请求，显示每个模型的毫秒耗时、失败状态和测试时间。测试结果只保存到私密目录的 `model-latency.json`，不保存响应内容或凭据。
-- “添加新模型”支持 `provider/model`、显示名、别名、OpenAI-compatible Base URL 和可选 API 密钥。API 密钥只通过服务器端 `openclaw models auth paste-api-key` 的标准输入处理，不进入本机日志；模型路由通过 `openclaw config set` 登记。
-- 模型管理使用 OpenClaw 官方 CLI 的模型配置入口；修改后由 OpenClaw 配置热加载，若服务器版本提示需要重启 Gateway，再按提示重启。
+## 快速开始
 
-### 服务器归档备份
+### 1. 获取代码
 
-- 点击备份后，应用先在服务器 `/tmp` 生成唯一的 `tar.gz` 快照文件，再读取其准确大小；之后通过 SSH `tail` 按本机临时文件已有长度读取远端归档。网络中断时远端归档和本机已传输前缀都会保留，重试会从断点继续，不会重新传输已经完成的字节。
-- 导航栏右侧的独立进度模块展示准确总量、已传输大小、当前传输速度、预计剩余时间和图形化进度条；完成后生成归档和 `snapshot-manifest.json`，并将临时目录改名为带时间戳的备份目录。
-- SSH 配置了保活检测。快照生成或传输中遇到可恢复的网络中断时最多自动重试 8 次，按 2、4、8、16、30 秒逐步等待；传输重试会显示保留的字节数、继续位置和当前速度。常规清单、记忆和表情包读写复用同一条 SSH Python 会话，异常时自动重建连接。
-- 备份开始后顶部按钮变为“暂停备份”。暂停会保留远端快照和本机临时归档，继续时从当前传输位置恢复；按钮随之变为“继续备份”。快照生成阶段的暂停请求会在当前生成命令结束后等待，传输阶段可以直接暂停读取。
-- 备份进行时右侧显示“取消备份”按钮；取消会终止当前 SSH 传输、清理本轮临时归档，并恢复“备份服务器”按钮。
-- 归档文件为 `server-rootfs.tar.gz`，清单记录主机、账号、时间、字节数、SHA-256、范围和一致性说明。失败时会尽力清理未完成的临时目录。
-- 备份开始前检查本地磁盘空间；归档写入 `server-rootfs.tar.gz.part`，传输结束后先解压读取验证 gzip 完整性，再原子改名为正式归档。清单也采用临时文件加原子改名。
-- 设置页可以调整备份保留数量（1–30，默认 5）；新备份完成后自动删除更旧的完整备份。应用启动时会清理上次异常退出留下的 `.staging-*` 临时目录。
-- 归档覆盖 `/`，包含已挂载文件系统，但排除 `/proc`、`/sys`、`/dev`、`/run`。这是在线文件级 tar 归档，不是原子磁盘/卷快照；运行中变化的文件可能出现时间点不一致。
-- 服务器端快照生成完成后会在任务结束时删除 `/tmp/.openclaw-debugger-*.tar.gz`；取消、失败和窗口关闭也会尽力清理。快照是任务开始时在线生成的文件级归档，生成期间文件可能变化，但传输重试始终读取同一份远端归档。
-- 当前实现提供创建与查看备份目录，不提供整机归档恢复流程。
+```powershell
+git clone <repository-url>
+cd OpenClaw-Debugger
+```
 
-## 目录结构
+### 2. 构建
+
+```powershell
+dotnet build OpenClawDebugger.csproj
+```
+
+### 3. 运行
+
+```powershell
+dotnet run --project OpenClawDebugger.csproj
+```
+
+也可以直接运行构建输出目录中的 `OpenClawDebugger.exe`。
+
+首次启动后，在“设置”中填写：
+
+- SSH 主机名或 IP
+- SSH 端口
+- SSH 用户名
+- OpenClaw 工作区路径
+- 表情包目录路径
+- 本地备份保留数量
+
+程序使用系统 SSH 客户端。请先确认 Windows 已安装 OpenSSH Client，并确保当前 Windows 用户可以通过 SSH 认证；不要把私钥或凭据复制到仓库。
+
+## 本地数据与隐私
+
+程序会在项目目录之外创建私有数据目录，保存设置、日志、回滚快照、上传临时文件、缩略图缓存和服务器备份。该目录不应加入 Git。
+
+仓库的 `.gitignore` 已覆盖以下类型：
+
+- Codex/本地说明文件
+- 私有设置和本地配置
+- SSH 私钥、令牌、凭据和环境变量文件
+- 日志、转储、临时文件和上传缓存
+- tar/zip 等备份归档
+- 导出文件、回滚目录和缩略图缓存
+
+提交代码前建议检查：
+
+```powershell
+git status --short --ignored
+git diff -- .
+```
+
+## 项目结构
 
 ```text
 OpenClaw-Debugger/
-├── Assets/
-│   ├── Backgrounds/       # Atri、洛茜主题背景
-│   └── OpenClawDebugger.ico
-├── WebUi/
-│   ├── index.html         # 页面结构和资源加载顺序
-│   ├── styles.css         # 基础布局、组件和动效
-│   ├── styles-overrides.css # 主题、调色板、上传和备份覆盖样式
-│   ├── bridge.js          # WebView 消息请求/响应和进度事件
-│   ├── bridge-contract.json # 前后端桥接协议版本、命令和参数结构
-│   ├── theme.js           # 主题、调色板和背景调节控制器
-│   ├── sticker-cache.js    # 原图/缩略图缓存控制器
-│   ├── memory-controller.js # 记忆列表、预览和保存控制器
-│   ├── model-state.js       # 模型页状态和请求代际
-│   ├── model-controller.js  # 模型列表、拖拽自动保存、延迟测试和添加模型
-│   ├── sticker-controller.js # 表情包目录、预览、标签和重命名控制器
-│   ├── upload-controller.js # 本地拖放、分块上传和目录登记控制器
-│   ├── backup-controller.js # 备份进度、暂停、继续和取消控制器
-│   ├── settings-controller.js # 连接设置表单控制器
-│   ├── app-state.js        # 跨控制器共享状态和状态适配器
-│   ├── connection-state.js # 连接状态、代际编号和取消控制器
-│   ├── memory-state.js     # 记忆编辑状态和读取/保存控制器引用
-│   ├── sticker-state.js    # 表情包、预览、重命名和保存状态
-│   ├── backup-state.js     # 备份进度、暂停和取消状态
-│   ├── settings-state.js   # 连接设置状态
-│   ├── event-bindings.js   # DOM 事件、拖放和窗口事件绑定
-│   └── app.js             # 页面编排和生命周期
-├── App.xaml(.cs)          # WPF 应用入口
-├── MainWindow.xaml(.cs)   # WebView2 生命周期、连接流程和控制器装配
-├── ConnectionCoordinator.cs # 连接生命周期、远程客户端和服务装配
-├── BridgeDispatcher.cs    # WebView 消息解析、来源校验和命令分发
-├── BridgeResponseWriter.cs # WebView 响应和进度事件输出
-├── BridgeCommandRouter.cs # 命令注册表和未注册命令拒绝
-├── BridgeCommandContract.cs # 桥接协议加载、参数校验和命令一致性检查
-├── BridgeProtocol.cs       # 桥接协议版本
-├── ConnectionBridgeHandler.cs # 初始化、连接和设置命令处理器
-├── MemoryBridgeHandler.cs # 记忆命令处理器
-├── StickerBridgeHandler.cs # 表情包命令处理器
-├── BackupBridgeHandler.cs # 备份命令处理器
-├── WindowBridgeHandler.cs # 窗口和本地目录命令处理器
-├── ConnectionSettings.cs  # SSH 和远程目录设置模型
-├── RemoteFile.cs          # 远程清单文件模型
-├── RemoteFileContent.cs   # 远程文件读取结果模型
-├── StickerRow.cs          # 表情包目录行模型
-├── UserSettings.cs        # 本机设置模型
-├── RemoteClientInterfaces.cs # 文件、表情包和快照客户端边界
-├── RemoteOpenClawClient.cs # 远程领域门面和请求模型
-├── RemoteAgentSession.cs  # 可复用 SSH Python 会话和响应协议
-├── RemoteStickerStreamUploader.cs # 低内存流式图片上传
-├── RemoteFileClient.cs    # 文件域客户端适配器
-├── RemoteStickerClient.cs # 表情包域客户端适配器
-├── RemoteModelClient.cs   # 模型域客户端适配器和数据模型
-├── RemoteAgentProgram.cs  # 独立维护的服务器端 Python 代理
-├── SshCommandRunner.cs    # OpenSSH 参数、校验和错误分类
-├── RemoteSnapshotClient.cs # 快照域客户端门面
-├── RemoteSnapshotTransport.cs # 快照生成、断点传输和清理实现
-├── BackupCoordinator.cs   # 备份启动、暂停、继续、取消和进度协调
-├── OperationLogStore.cs    # 结构化日志、脱敏和导出
-├── LoggingBridgeHandler.cs # 日志导出命令
-├── StickerService.cs      # 表情包目录、标签、重命名和上传业务
-├── StickerUploadService.cs # 分块上传会话和本地临时文件
-├── StickerThumbnailCache.cs # 缩略图生成、持久化和容量清理
-├── ModelService.cs        # 模型排序、延迟测试和添加模型业务
-├── ModelLatencyStore.cs   # 私密目录中的模型延迟记录
-├── ModelBridgeHandler.cs  # 模型桥接命令处理器
-├── ParsedStickerCatalog.cs # 解析后的目录编辑模型
-├── StickerCatalogEditor.cs # 表情包目录格式识别和 JSON 编辑
-├── StickerManifestSynchronizer.cs # MANIFEST.md 表格同步
-├── MemoryService.cs       # 记忆文件读取、冲突检测和回滚快照
-├── SettingsService.cs     # 设置校验、主题保存和配置持久化
-├── LocalSnapshotStore.cs  # DPAPI 加密的远端文件回滚副本
-├── LocalServerBackupStore.cs # 整机归档和本机清单写入
-├── SettingsRepository.cs  # 私密目录和本机设置
-├── OpenClawDebugger.csproj
-└── OpenClawDebugger.Tests.csproj # 独立自动化测试运行器
+├─ WebUi/                         # WebView2 页面、状态模块和控制器
+│  ├─ index.html
+│  ├─ styles.css
+│  ├─ styles-overrides.css
+│  ├─ bridge.js                   # 前端桥接协议
+│  ├─ bridge-contract.json        # 命令与参数契约
+│  ├─ *-state.js                  # 页面状态
+│  └─ *-controller.js             # 页面交互
+├─ Assets/                        # 应用图标和主题背景
+├─ *BridgeHandler.cs              # 按领域注册桥接命令
+├─ *Service.cs                    # 记忆、表情包、模型等领域服务
+├─ Remote*Client.cs               # 远程客户端接口和实现
+├─ RemoteAgentSession.cs          # 复用 SSH 的 JSON 会话
+├─ RemoteAgentProgram.cs          # 服务器端轻量代理
+├─ LocalServerBackupStore.cs      # 本地快照落盘、校验和保留策略
+├─ RemoteSnapshotTransport.cs     # 快照生成与流式断点传输
+├─ SettingsRepository.cs          # 仓库外私有设置
+└─ OpenClawDebugger.csproj
 ```
 
-## 本机私密数据
+## 备份格式
 
-私密目录固定在仓库外：
+每个快照目录包含：
 
-```text
-%USERPROFILE%\Documents\ChatGPT\Openclaw\OpenClaw-Debugger-Private\
-├── settings.json
-├── Rollback\                 # DPAPI 加密的远端文件旧版本
-├── Exports\
-├── Secrets\
-├── Logs\                     # 按天保存的结构化 JSONL 操作日志
-├── UploadStaging\            # 分块上传临时文件，提交或取消后删除
-├── ThumbnailCache\           # 固定尺寸缩略图持久化缓存
-├── model-latency.json        # 模型延迟结果，不含凭据和响应内容
-└── OpenClaw-Server-Backup\   # 整机 tar.gz 和快照清单
-```
+- `server-rootfs.tar.gz`：服务器根文件系统的压缩归档
+- `snapshot-manifest.json`：创建时间、归档大小、SHA-256、范围和一致性说明
 
-不要把 SSH 私钥、凭据、服务器导出数据或私密配置放入仓库。`.gitignore` 已忽略常见密钥文件及构建输出。连接设置、回滚数据和整机备份均写入上述私密目录。
+这是在线文件级归档。服务器文件在读取过程中可能发生变化，因此它不是磁盘或卷级的原子快照。恢复操作目前需要用户自行解压或使用其他运维工具完成。
 
-## 架构与修改约定
+## 开发约定
 
-- `WebUi/` 是 HTML UI 的唯一界面层；静态资源随构建复制。不要把远程 CDN 作为运行依赖。
-- UI 通过映射到固定来源 `https://openclaw.local` 的 WebView2 页面加载，并通过类型化消息调用宿主功能。
-- `WebUi/bridge-contract.json` 是桥接协议清单，定义协议版本、命令、超时和参数类型；桌面宿主启动时会加载并校验所有处理器，WebView 调用时也使用同一清单选择超时。
-- `MainWindow.xaml.cs` 只负责 WebView 生命周期、窗口关闭和控制器装配；`ConnectionCoordinator.cs` 负责连接生命周期、远程客户端和业务服务装配；`BridgeDispatcher.cs` 负责消息协议，`BridgeResponseWriter.cs` 负责响应和进度事件，`BridgeCommandRouter.cs` 与各 `*BridgeHandler.cs` 负责按领域注册命令。
-- 桌面宿主为远程命令建立互斥闸门，重复连接、备份和编辑会被拒绝；每个 WebView 请求都有独立取消令牌，`cancelOperation` 和窗口关闭会取消仍在运行的任务。
-- `MemoryService.cs` 负责记忆文件读取、二次哈希校验、DPAPI 回滚快照和保存；`SettingsService.cs` 负责连接设置校验及主题偏好持久化。
-- `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
-- `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责快照域接口。
-- `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界；`RemoteOpenClawClient.cs` 只保留领域门面，`RemoteAgentSession.cs` 管理复用 SSH 会话，`RemoteStickerStreamUploader.cs` 管理低内存流式上传，`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
-- 远程 Python 代理不再拼接进 SSH 命令行；SSH 只执行短命令，代理脚本先通过标准输入首行传递，随后继续复用同一输入流处理 JSON 或图片数据，避免 Windows 命令行长度限制（错误 206）。
-- `RemoteModelClient.cs` 是模型远程域边界；模型读写通过服务器上受限的 OpenClaw CLI 完成，不在客户端复制配置格式。`ModelService.cs` 校验模型引用、保存延迟记录并串行化排序、测试和添加操作。
-- `WebUi/app.js` 只负责编排和生命周期；`app-state.js` 管理跨控制器共享状态，`event-bindings.js` 管理 DOM、拖放和窗口事件，`memory-controller.js`、`sticker-controller.js`、`upload-controller.js`、`backup-controller.js`、`settings-controller.js` 各自维护对应功能；`bridge.js`、`theme.js`、`sticker-cache.js` 维护桥接、主题和缓存状态，样式覆盖集中在 `styles-overrides.css`。
-- `app-state.js` 只组合六个领域状态模块；连接、记忆读取、模型列表/延迟测试、图片预览、重命名、标签保存和备份均带代际检查或 `AbortController`，旧请求返回后不会覆盖当前页面。
-- 表情包上传按 `Blob.slice()` 逐块读取浏览器文件，每块计算 SHA-256，失败块最多自动重试 3 次；后端按偏移和校验值接收，并对重复提交的同一分块幂等返回，浏览器不会再一次性读取整张图片。
-- 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
-- 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
-- `OperationLogStore.cs` 记录操作 ID、开始时间、阶段、耗时、重试次数和 SSH 失败原因；日志正文会自动隐藏本地路径、私密目录和敏感参数。设置页的“导出操作日志”会把合并后的 JSONL 写入 `Exports` 并打开私密目录。
-- 模型 API 密钥不会写入 `model-latency.json`、操作日志或仓库；模型桥接操作只记录命令生命周期，不记录请求载荷。
+- 不要提交私钥、服务器地址、用户名、访问令牌或私有设置。
+- 新增 WebView 命令时同步更新 `WebUi/bridge-contract.json` 和 C# 契约校验。
+- 远程操作应支持取消、超时，并通过操作日志记录阶段、耗时和重试次数。
+- 涉及文件写入时使用临时文件、校验和及原子替换，避免半写入状态。
+- 变更 UI 后请同时检查 `WebUi/index.html`、对应状态模块和控制器。
 
-## P1 / P2 拆分完成情况
+## 许可证
 
-- **P1**：远程访问已经按文件、表情包、快照三个接口拆分；记忆读写和设置校验从 `MainWindow` 移到独立服务；服务器端 Python 代理单独维护。
-- **P2**：数据模型、表情包目录解析器、`MANIFEST.md` 同步器分别成文件；Web UI 的桥接、主题、缩略图缓存和 CSS 覆盖层独立成资源；`app.js` 保留页面状态编排。
-- 新增模块通过项目默认 SDK 编译项自动纳入，不需要手动修改 `.csproj`；Web UI 资源仍由 `WebUi\**\*` 自动复制。
-
-## P3 拆分完成情况
-
-- `RemoteOpenClawClient` 已拆成远程领域门面、`RemoteAgentSession` SSH 会话层和 `RemoteStickerStreamUploader` 流式上传层；连接复用、响应解析和流式传输不再混在领域方法中。
-- `MainWindow` 的大型命令 `switch` 已替换为 `BridgeCommandRouter` 注册表，各领域命令由独立处理器负责，窗口只装配依赖并转发请求。
-- Web UI 已按功能拆成记忆、表情包、上传、备份和设置控制器；共享状态移到 `app-state.js`，DOM 事件移到 `event-bindings.js`，`app.js` 从约 875 行缩减到约 298 行，只保留跨模块编排和生命周期。
-
-## P4 拆分完成情况
-
-- `ConnectionCoordinator.cs` 接管连接扫描、远程客户端、记忆服务、表情包服务和备份服务的创建与释放；`MainWindow.xaml.cs` 不再持有远程客户端和连接扫描实现。
-- `app-state.js` 集中维护前端状态及记忆、表情包、上传、备份、设置状态适配器；`event-bindings.js` 集中维护导航、编辑器、拖放、主题和窗口事件，控制器通过显式依赖接收所需回调。
-
-## P5 生命周期、协议与上传优化
-
-- WebView 请求统一携带协议版本和操作 ID；宿主按 `bridge-contract.json` 校验命令参数、设置服务端超时，并用取消令牌管理每个运行中的请求。
-- 连接、读取、编辑、重命名、上传提交和服务器备份使用互斥闸门；重复连接或备份会被拒绝，编辑和备份不能同时运行。窗口关闭时会取消桥接请求、备份、SSH 会话和本地上传临时文件。
-- 连接、记忆读取/保存、图片预览、原始标签保存和备份使用 `AbortController` 与代际检查，旧请求完成后不会覆盖新页面状态。
-- 表情包上传按固定分块从 `Blob` 读取，每块携带偏移和 SHA-256；失败块最多重试 3 次，服务器对已接收的相同分块幂等确认，避免重复上传和整图内存占用。
-
-## P6 可靠性、日志与测试
-
-- 上传控制器提供取消按钮、当前分块、速度和预计剩余时间；窗口关闭或应用启动时会取消并清理本地上传临时文件。
-- 本地备份执行磁盘空间预检、gzip 完整性验证、归档和清单原子提交、保留数量清理，以及启动时残留 `.staging-*` 清理。
-- `OperationLogStore` 以 JSONL 保存操作生命周期和 SSH 失败原因，统一脱敏并支持从设置页一键导出。
-- `OpenClawDebugger.Tests.csproj` 是无第三方测试依赖的运行器，用来验证备份控制和重试、上传分块幂等性、标签写入前置保护、协议校验、旧请求保护和日志脱敏。
-- 模型页面的桥接命令、模型引用校验、拖拽自动保存和延迟结果脱敏应在连接到测试服务器后做一次端到端检查；本地测试运行器不调用真实模型 API。
-
-### 按钮与 C# 桥接链路
-
-界面按钮由 `WebUi/event-bindings.js` 绑定 DOM 事件；控制器通过 `WebUi/bridge.js` 发送带协议版本和操作 ID 的消息；`BridgeDispatcher` 做来源、协议和参数校验，再交给 `BridgeCommandRouter` 及对应的 C# `*BridgeHandler`。因此 HTML 菜单不直接调用 WPF 控件，C# 远程操作通过这条桥接链路执行。若页面初始化异常，界面会在状态栏显示“界面初始化失败”，不会静默变成所有按钮无响应。
-
-## 运行与构建
-
-环境要求：
-
-- Windows
-- .NET 10 SDK（目标框架为 `net10.0-windows`）
-- Microsoft Edge WebView2 Runtime
-- Windows OpenSSH Client
-- 服务器上的 Python 3（常规远程文件操作）
-- 服务器可用的 Bash、GNU tar/gzip、`stat`、`tail`；备份账号还需允许非交互 `sudo -n tar`、`sudo -n stat`、`sudo -n tail` 和 `sudo -n rm`
-
-在项目目录启动开发版本：
-
-```powershell
-dotnet run --project .\OpenClawDebugger.csproj
-```
-
-普通构建：
-
-```powershell
-dotnet build .\OpenClawDebugger.csproj
-```
-
-自动化测试使用无外部测试框架的独立运行器，覆盖备份暂停/继续/取消、网络中断断点续传、上传分块校验与重复分块、标签事务前置回滚、桥接参数校验、旧请求保护和日志脱敏：
-
-```powershell
-dotnet run --project .\OpenClawDebugger.Tests.csproj
-```
-
-## 当前状态与交接提示
-
-- 当前桌面快捷方式固定启动 `bin\Current\net10.0-windows\OpenClawDebugger.exe`，工作目录也固定为该目录；快捷方式图标来自同一输出中的 `OpenClawDebugger.exe`。应用启动时给 WebView 页面追加程序集时间戳查询参数，避免旧 HTML/JavaScript 缓存继续生效。
-- 最近一次 Current 构建成功，0 个警告、0 个错误；已确认模型选项卡存在、DOM 导航事件可触发，所有 Web UI JavaScript 文件均通过语法检查。没有执行真实服务器整机备份或恢复测试。
-- 2026-09-29 修复了一个会阻止整页事件绑定的前端初始化错误：表情包保存控制器已正确暴露 `save` 方法，`app.js` 也补齐 `saveStickerRows` 包装函数；同时增加启动异常的可见提示，并允许在自动连接长时间等待时点击“取消连接”。
-- 仓库目标目录是 `Openclaw\OpenClaw-Debugger`。此前项目从 Napcat 工作区迁移到 Openclaw；修改前应先核对当前实际工作目录，避免改错同名目录。
-- 新对话开始时先读本 README、`git status` 和相关源码，再确认用户当前要改的功能。不要假设工作树干净，也不要把私密目录复制进仓库。
+当前仓库尚未指定开源许可证。公开发布前请根据项目需要补充 LICENSE 文件。

@@ -14,13 +14,15 @@
     }
     function fillSettings(value, retentionOverride) {
       state.value = value || state.value;
-      $('#hostInput').value = state.value.host || '106.14.173.90';
-      $('#usernameInput').value = state.value.username || 'admin';
+      $('#hostInput').value = state.value.host || '';
+      $('#usernameInput').value = state.value.username || '';
       $('#portInput').value = state.value.port || 22;
       $('#backupRetentionInput').value = retentionOverride || state.value.backupRetentionCount || 5;
-      $('#workspaceInput').value = state.value.workspacePath || '/home/admin/.openclaw/workspace';
-      $('#stickersInput').value = state.value.stickersPath || '/home/admin/.openclaw/workspace/stickers';
-      $('#targetSummary').textContent = (state.value.username || 'admin') + '@' + (state.value.host || '106.14.173.90');
+      $('#workspaceInput').value = state.value.workspacePath || '/home/user/.openclaw/workspace';
+      $('#stickersInput').value = state.value.stickersPath || '/home/user/.openclaw/workspace/stickers';
+      $('#targetSummary').textContent = state.value.username && state.value.host
+        ? state.value.username + '@' + state.value.host
+        : '未配置 SSH 目标';
     }
     async function saveConnectionSettings(andConnect) {
       try {

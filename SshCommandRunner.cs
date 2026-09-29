@@ -100,7 +100,7 @@ internal static class SshCommandRunner
         if (detail.Contains("Permission denied (", StringComparison.OrdinalIgnoreCase) ||
             detail.Contains("Permission denied, please try again", StringComparison.OrdinalIgnoreCase) ||
             detail.Contains("No supported authentication methods", StringComparison.OrdinalIgnoreCase))
-            return new InvalidOperationException("当前 Windows OpenSSH 身份未通过服务器认证。请确认此 Windows 用户执行 ssh admin@106.14.173.90 能直接登录。");
+            return new InvalidOperationException("当前 Windows OpenSSH 身份未通过服务器认证。请确认当前 Windows 用户可以直接执行 ssh <user>@<host> 登录目标服务器。");
         if (detail.Contains("a password is required", StringComparison.OrdinalIgnoreCase) ||
             detail.Contains("a terminal is required", StringComparison.OrdinalIgnoreCase))
             return new InvalidOperationException("完整服务器快照需要 admin 对 tar 命令具备免密 sudo 权限；当前连接不能交互输入 sudo 密码。");
