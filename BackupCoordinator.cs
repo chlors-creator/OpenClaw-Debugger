@@ -114,7 +114,8 @@ public sealed class BackupCoordinator : IDisposable
         if (controller.IsPaused)
         {
             controller.Resume();
-            if (_lastProgress is not null) _sendProgress("backup", _lastProgress);
+            if (_lastProgress is not null)
+                _sendProgress("backup", _lastProgress with { Phase = "transferring", Message = "备份已继续。" });
             return new BackupControlResult(Paused: false);
         }
 
