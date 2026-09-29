@@ -39,6 +39,8 @@
       const latency = Number(model.latencyMs);
       if (!Number.isFinite(latency))
         return { label: '测试失败', className: 'latency-failed', title: error };
+      if (latency > 15000)
+        return { label: '>15 s · 超时', className: 'latency-timeout', title: error || '超过 15 秒' };
       const measurement = String(model.latencyMeasurement || '');
       const prefix = measurement === 'first_event' || measurement === 'gateway_first_event' ? '首响应 ' : measurement === 'complete' ? '完整 ' : '';
       const measurementTitle = measurement === 'gateway_first_event'
@@ -47,11 +49,11 @@
           ? '直接通过模型接口测得首个流式事件，不等待完整回复'
           : measurement === 'complete' ? '完整响应耗时'
             : measurement === 'cli_full' ? '完整 OpenClaw CLI 进程耗时' : '';
-      if (latency <= 200)
-        return { label: prefix + latency + ' ms', className: 'latency-fast', title: measurementTitle || '200 ms 以内' };
-      if (latency <= 500)
-        return { label: prefix + latency + ' ms', className: 'latency-medium', title: measurementTitle || '201–500 ms' };
-      return { label: prefix + latency + ' ms', className: 'latency-slow', title: measurementTitle || '超过 500 ms' };
+      if (latency <= 3000)
+        return { label: prefix + latency + ' ms', className: 'latency-fast', title: measurementTitle || '3000 ms 以内' };
+      if (latency <= 8000)
+        return { label: prefix + latency + ' ms', className: 'latency-medium', title: measurementTitle || '3000–8000 ms' };
+      return { label: prefix + latency + ' ms', className: 'latency-slow', title: measurementTitle || '超过 8000 ms' };
     }
 
     function renderLatency(element, model) {
