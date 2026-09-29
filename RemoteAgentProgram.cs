@@ -542,7 +542,7 @@ def models_add():
 
 def models_test_latency():
     models = P.get("models", [])
-    if not isinstance(models, list) or not 1 <= len(models) <= 20:
+    if not isinstance(models, list) or not 1 <= len(models) <= 100:
         fail("测试模型列表无效", "bad_model_test")
     models = [item.strip() if isinstance(item, str) else "" for item in models]
     if any(not valid_model_ref(item) for item in models): fail("测试模型引用无效", "bad_model_test")
@@ -553,13 +553,13 @@ def models_test_latency():
         try:
             completed = subprocess.run(
                 ["openclaw", "infer", "model", "run", "--local", "--model", ref, "--prompt", "Reply with exactly: openclaw-debugger-latency", "--json"],
-                capture_output=True, text=True, timeout=45, env=os.environ.copy())
+                capture_output=True, text=True, timeout=15, env=os.environ.copy())
             if completed.returncode == 0:
                 results.append({"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "testedAtUtc": tested})
             else:
                 results.append({"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "testedAtUtc": tested})
         except subprocess.TimeoutExpired:
-            results.append({"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时", "testedAtUtc": tested})
+            results.append({"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "testedAtUtc": tested})
         except FileNotFoundError:
             fail("服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "openclaw_missing")
         except Exception as error:

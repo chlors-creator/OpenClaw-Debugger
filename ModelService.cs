@@ -134,7 +134,7 @@ public sealed class ModelService : IDisposable
             if (item.ValueKind != JsonValueKind.String) throw new InvalidDataException("测试模型必须是字符串。");
             return ValidateModelRef(item.GetString() ?? "");
         }).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        if (models.Count is < 1 or > 20) throw new InvalidDataException("一次只能测试 1–20 个模型。");
+        if (models.Count is < 1 or > 100) throw new InvalidDataException("一次最多测试 100 个模型。");
         return models;
     }
 

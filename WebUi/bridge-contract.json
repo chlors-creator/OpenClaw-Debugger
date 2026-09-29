@@ -9,7 +9,7 @@
     "readMemory": { "mode": "remote", "domain": "read", "timeoutMs": 180000, "payload": { "path": "string" } },
     "saveMemory": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "path": "string", "expectedSha256": "string", "text": "string" } },
     "getModels": { "mode": "remote", "domain": "model", "timeoutMs": 180000, "payload": {} },
-    "testModelLatency": { "mode": "remote", "domain": "model", "timeoutMs": 900000, "payload": { "models": "array" } },
+    "testModelLatency": { "mode": "remote", "domain": "model", "timeoutMs": 1800000, "payload": { "models": "array" } },
     "setModelOrder": { "mode": "remote", "domain": "model", "timeoutMs": 300000, "payload": { "primary": "string", "fallbacks": "array" } },
     "addModel": { "mode": "remote", "domain": "model", "timeoutMs": 300000, "payload": { "modelRef": "string", "alias": "string", "displayName": "string", "baseUrl": "string", "apiKey": "string" } },
     "readSticker": { "mode": "remote", "domain": "read", "timeoutMs": 180000, "payload": { "path": "string" } },

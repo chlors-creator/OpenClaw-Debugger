@@ -22,7 +22,13 @@ public sealed partial class RemoteOpenClawClient : IDisposable
         ConnectionSettings settings,
         JsonObject request,
         CancellationToken cancellationToken = default) =>
-        _session.InvokeAsync(settings, request, cancellationToken);
+        _session.InvokeAsync(
+            settings,
+            request,
+            cancellationToken,
+            string.Equals(request["action"]?.GetValue<string>(), "models_test_latency", StringComparison.Ordinal)
+                ? TimeSpan.FromMinutes(30)
+                : null);
 
 
     public async Task<IReadOnlyList<RemoteFile>> ConnectAndListAsync(

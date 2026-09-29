@@ -15,7 +15,8 @@ internal sealed class RemoteAgentSession : IDisposable
     private string? _sessionKey;
 
     public async Task<JsonObject> InvokeAsync(
-        ConnectionSettings settings, JsonObject request, CancellationToken cancellationToken)
+        ConnectionSettings settings, JsonObject request, CancellationToken cancellationToken,
+        TimeSpan? operationTimeout = null)
     {
         SshCommandRunner.ValidateSettings(settings);
         request["workspace"] = settings.WorkspacePath;
@@ -26,7 +27,7 @@ internal sealed class RemoteAgentSession : IDisposable
         {
             var process = EnsureSession(settings);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromMinutes(3));
+            timeout.CancelAfter(operationTimeout ?? TimeSpan.FromMinutes(3));
             await process.StandardInput.WriteAsync(payload.AsMemory(), timeout.Token);
             await process.StandardInput.WriteAsync("\n".AsMemory(), timeout.Token);
             await process.StandardInput.FlushAsync(timeout.Token);

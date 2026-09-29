@@ -13,10 +13,68 @@
       return selectedModels(snapshot).map(model => model.id);
     }
 
-    function latencyLabel(model) {
-      if (!model || model.lastTestedAtUtc === null || model.lastTestedAtUtc === undefined) return '尚未测试';
-      if (model.latencyMs === null || model.latencyMs === undefined) return '测试失败';
-      return model.latencyMs + ' ms';
+    function allModels(snapshot) {
+      if (!snapshot) return [];
+      const seen = new Set();
+      return [...selectedModels(snapshot), ...(snapshot.available || [])].filter(model => {
+        const id = model && model.id ? String(model.id) : '';
+        if (!id || seen.has(id.toLowerCase())) return false;
+        seen.add(id.toLowerCase());
+        return true;
+      });
+    }
+
+    function allModelIds(snapshot) {
+      return allModels(snapshot).map(model => model.id);
+    }
+
+    function latencyInfo(model) {
+      if (!model || model.lastTestedAtUtc === null || model.lastTestedAtUtc === undefined)
+        return { label: '尚未测试', className: 'latency-unset', title: '' };
+      const error = model.lastError ? String(model.lastError) : '';
+      if (/超时|timeout/i.test(error))
+        return { label: '>15 s · 超时', className: 'latency-timeout', title: error };
+      if (model.latencyMs === null || model.latencyMs === undefined)
+        return { label: '测试失败', className: 'latency-failed', title: error };
+      const latency = Number(model.latencyMs);
+      if (!Number.isFinite(latency))
+        return { label: '测试失败', className: 'latency-failed', title: error };
+      if (latency <= 200)
+        return { label: latency + ' ms', className: 'latency-fast', title: '200 ms 以内' };
+      if (latency <= 500)
+        return { label: latency + ' ms', className: 'latency-medium', title: '201–500 ms' };
+      return { label: latency + ' ms', className: 'latency-slow', title: '超过 500 ms' };
+    }
+
+    function renderLatency(element, model) {
+      const info = latencyInfo(model);
+      element.textContent = info.label;
+      element.title = info.title;
+      element.classList.remove('latency-unset', 'latency-fast', 'latency-medium', 'latency-slow', 'latency-failed', 'latency-timeout');
+      element.classList.add(info.className);
+    }
+
+    function isDeepSeek(model) {
+      const provider = String(model && model.provider || '').toLowerCase();
+      const id = String(model && model.id || '').toLowerCase();
+      return provider.includes('deepseek') || id.includes('deepseek');
+    }
+
+    function renderProviderMark(element, model, compact) {
+      element.replaceChildren();
+      element.classList.toggle('model-provider-deepseek', isDeepSeek(model));
+      if (isDeepSeek(model)) {
+        const image = document.createElement('img');
+        image.src = 'assets/deepseek-color.svg';
+        image.alt = 'DeepSeek';
+        image.loading = 'eager';
+        element.appendChild(image);
+        element.title = 'DeepSeek';
+        return;
+      }
+      const provider = safeText(model && model.provider, '—');
+      element.textContent = compact ? provider.slice(0, 1).toUpperCase() : provider;
+      element.title = provider;
     }
 
     function safeText(value, fallback) {
@@ -32,13 +90,15 @@
       row.setAttribute('aria-label', model.id + '，' + (index === 0 ? '当前模型' : '备选模型 ' + index));
       row.innerHTML = '<span class="model-drag-handle" title="拖拽调整顺序" aria-hidden="true">⋮⋮</span>' +
         '<span class="model-order-index">' + (index + 1) + '</span>' +
+        '<span class="model-provider-badge" aria-hidden="true"></span>' +
         '<span class="model-order-main"><strong></strong><small></small></span>' +
         '<span class="model-order-role"></span>' +
         '<span class="model-latency"></span>';
+      renderProviderMark(row.querySelector('.model-provider-badge'), model, true);
       row.querySelector('.model-order-main strong').textContent = safeText(model.name, model.id);
       row.querySelector('.model-order-main small').textContent = model.provider + ' · ' + model.id + (model.alias ? ' · ' + model.alias : '');
       row.querySelector('.model-order-role').textContent = index === 0 ? '当前' : '备选 ' + index;
-      row.querySelector('.model-latency').textContent = latencyLabel(model);
+      renderLatency(row.querySelector('.model-latency'), model);
       if (index === 0) row.classList.add('model-primary-row');
       row.addEventListener('dragstart', event => {
         if (state.saving) { event.preventDefault(); return; }
@@ -79,8 +139,13 @@
       const current = snapshot && snapshot.primary;
       $('#modelCurrentName').textContent = current ? safeText(current.name, current.id) : '未读取';
       $('#modelCurrentRef').textContent = current ? current.id : '连接服务器后读取模型配置';
-      $('#modelCurrentProvider').textContent = current ? current.provider : '—';
-      $('#modelCurrentLatency').textContent = current ? latencyLabel(current) : '—';
+      renderProviderMark($('#modelCurrentProvider'), current, false);
+      if (current) renderLatency($('#modelCurrentLatency'), current);
+      else {
+        $('#modelCurrentLatency').textContent = '—';
+        $('#modelCurrentLatency').title = '';
+        $('#modelCurrentLatency').className = 'latency-unset';
+      }
       $('#modelCurrentStatus').textContent = current ? safeText(current.status, 'unknown') : '—';
       $('#modelCurrentTested').textContent = current && current.lastTestedAtUtc ? new Date(current.lastTestedAtUtc).toLocaleString() : '尚未测试';
     }
@@ -111,10 +176,11 @@
       models.forEach(model => {
         const row = document.createElement('div');
         row.className = 'model-available-row';
-        row.innerHTML = '<span class="model-available-main"><strong></strong><small></small></span><span class="model-latency"></span><button class="button button-quiet model-use-button" type="button">加入备选</button>';
+        row.innerHTML = '<span class="model-provider-badge" aria-hidden="true"></span><span class="model-available-main"><strong></strong><small></small></span><span class="model-latency"></span><button class="button button-quiet model-use-button" type="button">加入备选</button>';
+        renderProviderMark(row.querySelector('.model-provider-badge'), model, true);
         row.querySelector('strong').textContent = safeText(model.name, model.id);
         row.querySelector('small').textContent = model.provider + ' · ' + model.id;
-        row.querySelector('.model-latency').textContent = latencyLabel(model);
+        renderLatency(row.querySelector('.model-latency'), model);
         row.querySelector('.model-use-button').addEventListener('click', () => persistOrder([...orderIds(state.snapshot), model.id]));
         list.appendChild(row);
       });
@@ -133,7 +199,7 @@
 
     function syncButtons() {
       const connected = isConnected();
-      $('#testModelLatencyButton').disabled = !connected || state.loading || state.testing || state.saving || !selectedModels(state.snapshot).length;
+      $('#testModelLatencyButton').disabled = !connected || state.loading || state.testing || state.saving || !allModelIds(state.snapshot).length;
       $('#addModelButton').disabled = !connected || state.loading || state.testing || state.saving || state.adding;
       document.body.classList.toggle('model-operation-active', state.testing || state.saving || state.adding);
       if (state.loading) $('#modelLatencyStatus').textContent = '正在读取服务器模型配置…';
@@ -178,7 +244,7 @@
     async function persistOrder(ids) {
       if (!isConnected() || state.saving || ids.length < 1) return;
       const previous = state.snapshot;
-      const byId = new Map(selectedModels(previous).map(model => [model.id, model]));
+      const byId = new Map(allModels(previous).map(model => [model.id, model]));
       const ordered = ids.map(id => byId.get(id)).filter(Boolean);
       if (ordered.length !== ids.length) { await load(); return; }
       state.snapshot = { ...previous, primary: ordered[0], fallbacks: ordered.slice(1) };
@@ -210,7 +276,7 @@
 
     async function testLatency() {
       if (!isConnected() || state.testing) return;
-      const models = orderIds(state.snapshot);
+      const models = allModelIds(state.snapshot);
       if (!models.length) { showToast('当前没有可测试的模型。', true); return; }
       state.testController?.abort();
       const controller = new AbortController();
