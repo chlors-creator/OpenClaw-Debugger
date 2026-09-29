@@ -7,7 +7,8 @@ public sealed record StoredModelLatency(
     int? LatencyMs,
     bool Success,
     DateTimeOffset TestedAtUtc,
-    string? Error);
+    string? Error,
+    string? LatencyMeasurement = null);
 
 /// <summary>只保存模型探测结果，不保存提示词、响应内容或任何凭据。</summary>
 public sealed class ModelLatencyStore
@@ -36,7 +37,7 @@ public sealed class ModelLatencyStore
             foreach (var result in results)
             {
                 if (string.IsNullOrWhiteSpace(result.ModelId)) continue;
-                _values[result.ModelId] = new StoredModelLatency(result.LatencyMs, result.Success, result.TestedAtUtc, result.Error);
+                _values[result.ModelId] = new StoredModelLatency(result.LatencyMs, result.Success, result.TestedAtUtc, result.Error, result.LatencyMeasurement);
             }
             SaveLocked();
         }
@@ -51,7 +52,7 @@ public sealed class ModelLatencyStore
             var stored = Get(model.Id);
             return stored is null
                 ? model
-                : model with { LatencyMs = stored.LatencyMs, LastTestedAtUtc = stored.TestedAtUtc, LastError = stored.Error };
+                : model with { LatencyMs = stored.LatencyMs, LastTestedAtUtc = stored.TestedAtUtc, LastError = stored.Error, LatencyMeasurement = stored.LatencyMeasurement };
         }
 
         return snapshot with

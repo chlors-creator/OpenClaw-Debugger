@@ -11,14 +11,16 @@ public sealed record RemoteModelInfo(
     string? Alias = null,
     int? LatencyMs = null,
     DateTimeOffset? LastTestedAtUtc = null,
-    string? LastError = null);
+    string? LastError = null,
+    string? LatencyMeasurement = null);
 
 public sealed record RemoteModelLatencyResult(
     string ModelId,
     bool Success,
     int? LatencyMs,
     string? Error,
-    DateTimeOffset TestedAtUtc);
+    DateTimeOffset TestedAtUtc,
+    string? LatencyMeasurement = null);
 
 public sealed record RemoteModelSnapshot(
     RemoteModelInfo? Primary,
@@ -41,7 +43,7 @@ public interface IRemoteModelClient
     Task<IReadOnlyList<RemoteModelLatencyResult>> TestLatencyAsync(ConnectionSettings settings, IReadOnlyList<string> modelIds, CancellationToken cancellationToken = default);
 }
 
-/// <summary>模型领域客户端。服务器上的 OpenClaw CLI 负责读取和写入模型配置。</summary>
+/// <summary>模型领域客户端。模型读取优先使用服务器常驻 Gateway 查询会话，写入仍由服务器端 OpenClaw 配置命令负责。</summary>
 public sealed class RemoteModelClient : IRemoteModelClient
 {
     private readonly RemoteOpenClawClient _remote;
@@ -112,7 +114,8 @@ public sealed class RemoteModelClient : IRemoteModelClient
                 GetBoolean(row["success"]),
                 GetInt(row["latencyMs"]),
                 GetString(row["error"]),
-                ParseDateTime(GetString(row["testedAtUtc"])) ?? testedAt));
+                ParseDateTime(GetString(row["testedAtUtc"])) ?? testedAt,
+                GetString(row["measurement"])));
         }
         return results;
     }
@@ -145,7 +148,8 @@ public sealed class RemoteModelClient : IRemoteModelClient
             GetString(node["alias"]),
             GetInt(node["latencyMs"]),
             ParseDateTime(GetString(node["lastTestedAtUtc"])),
-            GetString(node["lastError"]));
+            GetString(node["lastError"]),
+            GetString(node["latencyMeasurement"]));
     }
 
     private static string? GetString(JsonNode? node) =>

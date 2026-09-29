@@ -39,11 +39,16 @@
       const latency = Number(model.latencyMs);
       if (!Number.isFinite(latency))
         return { label: '测试失败', className: 'latency-failed', title: error };
+      const measurement = String(model.latencyMeasurement || '');
+      const prefix = measurement === 'first_event' ? '首响应 ' : measurement === 'complete' ? '完整 ' : '';
+      const measurementTitle = measurement === 'first_event'
+        ? '首个流式事件，不等待完整回复'
+        : measurement === 'complete' ? '完整响应耗时' : '';
       if (latency <= 200)
-        return { label: latency + ' ms', className: 'latency-fast', title: '200 ms 以内' };
+        return { label: prefix + latency + ' ms', className: 'latency-fast', title: measurementTitle || '200 ms 以内' };
       if (latency <= 500)
-        return { label: latency + ' ms', className: 'latency-medium', title: '201–500 ms' };
-      return { label: latency + ' ms', className: 'latency-slow', title: '超过 500 ms' };
+        return { label: prefix + latency + ' ms', className: 'latency-medium', title: measurementTitle || '201–500 ms' };
+      return { label: prefix + latency + ' ms', className: 'latency-slow', title: measurementTitle || '超过 500 ms' };
     }
 
     function renderLatency(element, model) {
@@ -250,7 +255,7 @@
         };
         $('#modelLatencyStatus').textContent = phaseText[state.loadPhase] || '正在读取服务器模型配置……';
       }
-      else if (state.testing) $("#modelLatencyStatus").textContent = "正在并发探测模型（最多 10 个同时进行），完成一个即补充下一个…";
+      else if (state.testing) $("#modelLatencyStatus").textContent = "测试模型延迟ing";
       else if (state.saving) $('#modelLatencyStatus').textContent = state.pendingOrder ? '正在保存当前顺序，下一次加入已排队…' : '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
       else if (!state.snapshot) $('#modelLatencyStatus').textContent = connected ? '点击“测试延迟”或加载模型配置。' : '连接服务器后读取模型配置。';

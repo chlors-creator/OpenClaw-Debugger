@@ -4,7 +4,8 @@ namespace OpenClawDebugger;
 internal static class RemoteAgentProgram
 {
     public const string Main = """
-import base64, hashlib, json, os, re, stat, subprocess, sys, tempfile, time
+import base64, hashlib, json, os, re, stat, subprocess, sys, tempfile, time, socket, struct, select, threading
+import urllib.error, urllib.parse, urllib.request
 from pathlib import PurePosixPath
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
@@ -14,10 +15,185 @@ MODEL_CACHE = None
 MODEL_CACHE_AT = 0.0
 MODEL_CACHE_TTL = 30.0
 MODEL_CACHE_SCOPE = None
+MODEL_GATEWAY = None
+MODEL_PROVIDER_CACHE = None
+MODEL_PROVIDER_CACHE_AT = 0.0
+MODEL_PROVIDER_CACHE_TTL = 60.0
 ROOT_DOCS = {"MEMORY.md", "USER.md", "AGENTS.md", "SOUL.md", "DREAMS.md"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_TEXT = 4 * 1024 * 1024
 MAX_IMAGE = 16 * 1024 * 1024
+
+def openclaw_config():
+    candidates = []
+    configured = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+    if configured: candidates.append(os.path.expanduser(configured))
+    candidates.extend([
+        os.path.expanduser("~/.openclaw/openclaw.json"),
+        os.path.expanduser("~/.openclaw/config.json"),
+    ])
+    for candidate in candidates:
+        try:
+            with open(candidate, "r", encoding="utf-8") as stream:
+                value = json.load(stream)
+            if isinstance(value, dict): return value
+        except (OSError, ValueError):
+            pass
+    return {}
+
+def gateway_settings():
+    config = openclaw_config()
+    gateway = config.get("gateway") if isinstance(config.get("gateway"), dict) else {}
+    auth = gateway.get("auth") if isinstance(gateway.get("auth"), dict) else {}
+    try:
+        port = int(os.environ.get("OPENCLAW_GATEWAY_PORT", "") or gateway.get("port") or 18789)
+    except (TypeError, ValueError):
+        port = 18789
+    mode = str(auth.get("mode") or "token").lower()
+    if mode == "password":
+        secret = os.environ.get("OPENCLAW_GATEWAY_PASSWORD", "") or str(auth.get("password") or "")
+        return port, "password", secret
+    secret = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "") or str(auth.get("token") or "")
+    return port, "token", secret
+
+class ModelGatewayQueryProcess:
+    # 常驻 Gateway 查询会话；模型读取不再为每次请求启动 OpenClaw CLI。
+    def __init__(self):
+        self.sock = None
+        self.lock = threading.Lock()
+        self.sequence = 0
+
+    def close(self):
+        sock, self.sock = self.sock, None
+        if sock is not None:
+            try: sock.close()
+            except OSError: pass
+
+    def _read_exact(self, size):
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = self.sock.recv(remaining)
+            if not chunk: raise ConnectionError("OpenClaw Gateway 连接已关闭")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _send_frame(self, opcode, payload):
+        payload = payload if isinstance(payload, bytes) else bytes(payload)
+        mask = os.urandom(4)
+        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        length = len(masked)
+        header = bytearray([0x80 | opcode])
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack("!H", length))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack("!Q", length))
+        self.sock.sendall(bytes(header) + mask + masked)
+
+    def _receive_frame(self):
+        first, second = self._read_exact(2)
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        length = second & 0x7F
+        if length == 126: length = struct.unpack("!H", self._read_exact(2))[0]
+        elif length == 127: length = struct.unpack("!Q", self._read_exact(8))[0]
+        if length > 32 * 1024 * 1024: raise ValueError("Gateway 响应超过允许大小")
+        mask = self._read_exact(4) if masked else None
+        data = self._read_exact(length)
+        if mask is not None:
+            data = bytes(value ^ mask[index % 4] for index, value in enumerate(data))
+        if opcode == 0x8: raise ConnectionError("OpenClaw Gateway 已关闭查询连接")
+        if opcode == 0x9:
+            self._send_frame(0xA, data)
+            return None
+        if opcode != 0x1: return None
+        return data.decode("utf-8")
+
+    def _send_json(self, value):
+        self._send_frame(0x1, json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    def _connect(self):
+        port, auth_kind, secret = gateway_settings()
+        sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        self.sock = sock
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ) % (port, key)
+        sock.sendall(request.encode("ascii"))
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk: raise ConnectionError("Gateway WebSocket 握手失败")
+            response += chunk
+            if len(response) > 65536: raise ConnectionError("Gateway WebSocket 握手响应过大")
+        if not response.startswith(b"HTTP/1.1 101"):
+            raise ConnectionError("OpenClaw Gateway 未接受 WebSocket 连接")
+        sock.settimeout(1.0)
+        try:
+            if select.select([sock], [], [], 0.8)[0]: self._receive_frame()
+        except socket.timeout:
+            pass
+        sock.settimeout(10.0)
+        self.sequence += 1
+        params = {
+            "minProtocol": 3,
+            "maxProtocol": 4,
+            "client": {"id": "openclaw-debugger", "displayName": "OpenClaw Debugger", "version": "1.0", "platform": "linux", "mode": "operator"},
+            "role": "operator",
+            "scopes": ["operator.read", "operator.write"],
+            "caps": [],
+        }
+        if secret: params["auth"] = {auth_kind: secret}
+        request_id = "debugger-connect-" + str(self.sequence)
+        self._send_json({"type": "req", "id": request_id, "method": "connect", "params": params})
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            message = self._receive_frame()
+            if not message: continue
+            value = json.loads(message)
+            if value.get("type") == "res" and value.get("id") == request_id:
+                if value.get("ok") is not True:
+                    raise ConnectionError("Gateway 连接认证失败")
+                return
+        raise TimeoutError("OpenClaw Gateway 握手超时")
+
+    def request(self, method, params=None):
+        with self.lock:
+            if self.sock is None: self._connect()
+            self.sequence += 1
+            request_id = "debugger-model-" + str(self.sequence)
+            self._send_json({"type": "req", "id": request_id, "method": method, "params": params or {}})
+            deadline = time.monotonic() + 30
+            try:
+                while time.monotonic() < deadline:
+                    message = self._receive_frame()
+                    if not message: continue
+                    value = json.loads(message)
+                    if value.get("type") != "res" or value.get("id") != request_id: continue
+                    if value.get("ok") is not True:
+                        error = value.get("error")
+                        raise RuntimeError("Gateway 模型查询失败" + ((": " + str(error)) if error else ""))
+                    return value.get("payload") or {}
+                raise TimeoutError("Gateway 模型查询超时")
+            except Exception:
+                self.close()
+                raise
+
+def gateway_model_list():
+    global MODEL_GATEWAY
+    if MODEL_GATEWAY is None: MODEL_GATEWAY = ModelGatewayQueryProcess()
+    try:
+        return MODEL_GATEWAY.request("models.list", {"view": "all"})
+    except Exception:
+        if MODEL_GATEWAY is not None: MODEL_GATEWAY.close()
+        raise
 
 def fail(message, code="remote_error"):
     print(json.dumps({"ok": False, "code": code, "error": message}, ensure_ascii=False))
@@ -423,6 +599,10 @@ def model_key(value):
 
 def model_row(value, selected=False):
     ref = model_ref(value)
+    if isinstance(value, dict) and isinstance(ref, str) and "/" not in ref:
+        provider_hint = value.get("provider")
+        if isinstance(provider_hint, str) and provider_hint.strip():
+            ref = provider_hint.strip() + "/" + ref
     if not valid_model_ref(ref):
         return None
     if isinstance(value, dict):
@@ -475,8 +655,15 @@ def models_inventory_core(force=False):
     global MODEL_CACHE, MODEL_CACHE_AT
     if not force and MODEL_CACHE is not None and (time.monotonic() - MODEL_CACHE_AT) < MODEL_CACHE_TTL:
         return MODEL_CACHE
-    status = openclaw_json(["models", "status", "--json"])
-    catalog = openclaw_json(["models", "list", "--all", "--json"])
+    # 优先调用服务器常驻 Gateway 的 models.list RPC。Gateway 已经加载了
+    # OpenClaw 运行时和模型目录，避免每次查询重新启动 OpenClaw CLI。
+    # Gateway 不可用时才回退到 CLI，保证旧版/未启动 Gateway 的服务器仍能使用。
+    try:
+        catalog = gateway_model_list()
+        status = {"config": openclaw_config()}
+    except Exception:
+        status = openclaw_json(["models", "status", "--json"])
+        catalog = openclaw_json(["models", "list", "--all", "--json"])
     primary_ref = nested_model_value(status)
     fallback_refs = configured_fallbacks(status)
     catalog_values = catalog.get("models") or catalog.get("items") or catalog.get("data") or []
@@ -497,6 +684,12 @@ def models_inventory_core(force=False):
             if row:
                 by_id[key] = row
                 available.append(row)
+    if not primary_ref:
+        for value in catalog_values if isinstance(catalog_values, list) else []:
+            tags = value.get("tags") if isinstance(value, dict) else None
+            if isinstance(tags, list) and any(str(tag).lower() in ("default", "primary") for tag in tags):
+                primary_ref = model_ref(value)
+                break
     primary = by_id.get(model_key(primary_ref)) if primary_ref else None
     primary_key = model_key(primary_ref)
     fallbacks = [by_id[model_key(ref)] for ref in fallback_refs if model_key(ref) in by_id and model_key(ref) != primary_key]
@@ -605,6 +798,91 @@ def models_add():
     # 配置已改变，不能返回旧清单。
     print(json.dumps(models_inventory_core(force=True), ensure_ascii=False, separators=(",", ":")))
 
+def model_provider_config(ref):
+    # 返回可安全直接探测的 OpenAI-compatible 配置；密钥只留在远程进程内。
+    global MODEL_PROVIDER_CACHE, MODEL_PROVIDER_CACHE_AT
+    now = time.monotonic()
+    if MODEL_PROVIDER_CACHE is None or now - MODEL_PROVIDER_CACHE_AT >= MODEL_PROVIDER_CACHE_TTL:
+        config = openclaw_config()
+        models_config = config.get("models") if isinstance(config, dict) else None
+        providers = models_config.get("providers") if isinstance(models_config, dict) else None
+        MODEL_PROVIDER_CACHE = providers if isinstance(providers, dict) else {}
+        MODEL_PROVIDER_CACHE_AT = now
+    if not isinstance(ref, str) or "/" not in ref:
+        return None
+    provider, model_id = ref.split("/", 1)
+    value = MODEL_PROVIDER_CACHE.get(provider)
+    if not isinstance(value, dict):
+        return None
+    api = str(value.get("api") or "").lower()
+    base_url = value.get("baseUrl")
+    api_key = value.get("apiKey") or value.get("key")
+    if api not in ("openai-completions", "openai-chat-completions"):
+        return None
+    if not isinstance(base_url, str) or not re.match(r"^https?://", base_url, re.I):
+        return None
+    if not isinstance(api_key, str) or not api_key.strip():
+        return None
+    return base_url.rstrip("/") + "/chat/completions", api_key.strip(), model_id
+
+def direct_model_probe(ref):
+    # 以最小流式请求测首个 SSE 事件，避免启动一次完整 OpenClaw CLI。
+    configured = model_provider_config(ref)
+    if configured is None:
+        return None
+    url, api_key, model_id = configured
+    started = time.perf_counter()
+    payload = json.dumps({
+        "model": model_id,
+        "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": True,
+    }, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Accept": "text/event-stream",
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "OpenClaw-Debugger/1.0",
+        },
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=8)
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if "text/event-stream" in content_type:
+            while True:
+                line = response.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").strip()
+                if not text.lower().startswith("data:"):
+                    continue
+                data = text[5:].strip()
+                if data and data != "[DONE]":
+                    latency = max(1, int((time.perf_counter() - started) * 1000))
+                    try: response.close()
+                    except Exception: pass
+                    return {"success": True, "latencyMs": latency, "error": None, "measurement": "first_event"}
+            try: response.close()
+            except Exception: pass
+            return {"success": False, "latencyMs": None, "error": "模型未返回首个流式事件", "measurement": "first_event"}
+        response.read(64 * 1024)
+        latency = max(1, int((time.perf_counter() - started) * 1000))
+        try: response.close()
+        except Exception: pass
+        return {"success": True, "latencyMs": latency, "error": None, "measurement": "complete"}
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try: detail = error.read(512).decode("utf-8", "replace")
+        except Exception: pass
+        return {"success": False, "latencyMs": None, "error": redact_cli_error("HTTP " + str(error.code) + (": " + detail if detail else "")), "measurement": "first_event"}
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return {"success": False, "latencyMs": None, "error": redact_cli_error(error), "measurement": "first_event"}
+
 def models_test_latency():
     models = P.get("models", [])
     if not isinstance(models, list) or not 1 <= len(models) <= 100:
@@ -616,19 +894,24 @@ def models_test_latency():
     def probe(ref):
         started = time.perf_counter()
         try:
+            direct = direct_model_probe(ref)
+            if direct is not None:
+                direct["modelId"] = ref
+                direct["testedAtUtc"] = tested
+                return direct
             completed = subprocess.run(
                 ["openclaw", "infer", "model", "run", "--local", "--model", ref, "--prompt", "Reply with exactly: openclaw-debugger-latency", "--json"],
                 capture_output=True, text=True, timeout=15, env=os.environ.copy())
             if completed.returncode == 0:
-                return {"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "testedAtUtc": tested}
-            return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "testedAtUtc": tested}
+                return {"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "measurement": "cli_full", "testedAtUtc": tested}
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "measurement": "cli_full", "testedAtUtc": tested}
         except subprocess.TimeoutExpired:
             # 超时模型在当前 future 完成后立即出队，不占用后续探测槽位。
-            return {"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "timedOut": True, "testedAtUtc": tested}
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "measurement": "cli_full", "timedOut": True, "testedAtUtc": tested}
         except FileNotFoundError:
-            return {"modelId": ref, "success": False, "latencyMs": None, "error": "服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "fatalCode": "openclaw_missing", "testedAtUtc": tested}
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": "服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "measurement": "cli_full", "fatalCode": "openclaw_missing", "testedAtUtc": tested}
         except Exception as error:
-            return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "testedAtUtc": tested}
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "measurement": "cli_full", "testedAtUtc": tested}
 
     # 保持最多 10 个探测同时运行；任意一个完成后立即从待测队列补充下一个。
     max_workers = min(10, len(models))
@@ -649,7 +932,7 @@ def models_test_latency():
                     result = future.result()
                 except Exception as error:
                     # 单个探测异常不能阻塞队列；将它视为失败并继续补充下一个模型。
-                    result = {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "testedAtUtc": tested}
+                    result = {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "measurement": "cli_full", "testedAtUtc": tested}
                 fatal_code = fatal_code or result.pop("fatalCode", None)
                 results_by_id[ref] = result
                 next_ref = next(pending, None)
