@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -10,6 +11,8 @@ namespace OpenClawDebugger;
 /// </summary>
 public sealed class OperationLogStore
 {
+    private const long MaxLogBytes = 8L * 1024 * 1024;
+    private const int MaxArchivedLogs = 8;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false
@@ -111,7 +114,46 @@ public sealed class OperationLogStore
         var line = JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine;
         lock (_writeGate)
         {
+            RotateIfNeeded(path, Encoding.UTF8.GetByteCount(line));
             File.AppendAllText(path, line);
+        }
+    }
+
+    private void RotateIfNeeded(string path, int incomingBytes)
+    {
+        try
+        {
+            var length = File.Exists(path) ? new FileInfo(path).Length : 0;
+            if (length == 0 || length + incomingBytes <= MaxLogBytes) return;
+
+            var archive = Path.Combine(
+                _logDirectory,
+                $"operations-{DateTimeOffset.Now:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}.jsonl");
+            File.Move(path, archive, false);
+            CleanupArchivedLogs();
+        }
+        catch (IOException)
+        {
+            // 日志不能影响实际的远程操作；下次写入仍会再次尝试轮换。
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // 私密目录权限异常时保留当前日志写入路径，避免操作因为日志失败中断。
+        }
+    }
+
+    private void CleanupArchivedLogs()
+    {
+        var archives = Directory.EnumerateFiles(_logDirectory, "operations-*.jsonl")
+            .Where(file => !Path.GetFileName(file).Equals(
+                $"operations-{DateTimeOffset.Now:yyyyMMdd}.jsonl", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .Skip(MaxArchivedLogs)
+            .ToArray();
+        foreach (var archive in archives)
+        {
+            try { File.Delete(archive); } catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 

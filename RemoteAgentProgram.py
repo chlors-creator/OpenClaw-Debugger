@@ -1,4 +1,4 @@
-import base64, contextlib, hashlib, io, json, os, re, stat, subprocess, sys, tempfile, time, socket, struct, select, threading
+import base64, contextlib, hashlib, hmac, io, json, os, re, stat, subprocess, sys, tempfile, time, socket, struct, select, threading
 import urllib.error, urllib.parse, urllib.request
 from pathlib import PurePosixPath
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -10,11 +10,12 @@ except ImportError:
 P = {}
 ROOTS = {}
 PROTOCOL_VERSION = 3
-SCRIPT_HASH = "sha256:b7bd9e1efc8863ee267458c1de484d2105759f1506a1c510ceea7b14bbc164e9"
+SCRIPT_HASH = "sha256:2c200a60d16f6239eb1613a2266c90f2cd2f58e63f7f69088210011bd529bff6"
 MODEL_CACHE = None
 MODEL_CACHE_AT = 0.0
 MODEL_CACHE_TTL = 30.0
 MODEL_CACHE_SCOPE = None
+MODEL_CACHE_SOURCE_HASH = None
 MODEL_GATEWAY = None
 MODEL_PROVIDER_CACHE = None
 MODEL_PROVIDER_CACHE_AT = 0.0
@@ -693,9 +694,29 @@ def configured_fallbacks(status):
             return [value for value in values if valid_model_ref(value)]
     return []
 
+def model_config_source_hash(config=None):
+    if config is None:
+        config = openclaw_config()
+    try:
+        encoded = json.dumps(config if isinstance(config, dict) else {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = b"{}"
+    return hashlib.sha256(encoded).hexdigest()
+
+def model_config_hash(primary, fallbacks, available):
+    payload = {
+        "primary": primary,
+        "fallbacks": fallbacks,
+        # 可用目录的展示顺序由不同 Gateway/CLI 版本决定，哈希只关心模型内容。
+        "available": sorted(available or [], key=lambda row: str(row.get("id", "")).casefold()) if isinstance(available, list) else available,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
 def models_inventory_core(force=False):
-    global MODEL_CACHE, MODEL_CACHE_AT
-    if not force and MODEL_CACHE is not None and (time.monotonic() - MODEL_CACHE_AT) < MODEL_CACHE_TTL:
+    global MODEL_CACHE, MODEL_CACHE_AT, MODEL_CACHE_SOURCE_HASH
+    source_hash = model_config_source_hash()
+    if not force and MODEL_CACHE is not None and MODEL_CACHE_SOURCE_HASH == source_hash and (time.monotonic() - MODEL_CACHE_AT) < MODEL_CACHE_TTL:
         return MODEL_CACHE
     # 优先调用服务器常驻 Gateway 的 configured models.list RPC。Gateway 已经加载了
     # OpenClaw 运行时和模型配置，避免把完整发布目录误显示为可用模型，
@@ -740,12 +761,24 @@ def models_inventory_core(force=False):
     if primary: selected.add(model_key(primary["id"]))
     available = [row for row in available if model_key(row["id"]) not in selected]
     snapshot = {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    snapshot["configHash"] = model_config_hash(primary, fallbacks, available)
     MODEL_CACHE = snapshot
     MODEL_CACHE_AT = time.monotonic()
+    MODEL_CACHE_SOURCE_HASH = source_hash
     return snapshot
 
 def models_inventory():
-    print(json.dumps(models_inventory_core(), ensure_ascii=False, separators=(",", ":")))
+    snapshot = models_inventory_core()
+    known = P.get("knownConfigHash") if isinstance(P.get("knownConfigHash"), str) else ""
+    if known and snapshot.get("configHash") and hmac.compare_digest(known, snapshot["configHash"]):
+        print(json.dumps({
+            "ok": True,
+            "unchanged": True,
+            "configHash": snapshot["configHash"],
+            "retrievedAtUtc": snapshot.get("retrievedAtUtc"),
+        }, ensure_ascii=False, separators=(",", ":")))
+        return
+    print(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")))
 
 def snapshot_with_order(base, primary_ref, fallback_refs):
     rows = []
@@ -781,7 +814,9 @@ def snapshot_with_order(base, primary_ref, fallback_refs):
         if key and key not in selected and key not in available_keys:
             available.append(row)
             available_keys.add(key)
-    return {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    snapshot = {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    snapshot["configHash"] = model_config_hash(primary, fallbacks, available)
+    return snapshot
 def apply_model_order(primary, fallbacks):
     subprocess.run(["openclaw", "models", "set", primary], check=True, capture_output=True, text=True, timeout=90)
     subprocess.run(["openclaw", "models", "fallbacks", "clear"], check=True, capture_output=True, text=True, timeout=90)
@@ -789,7 +824,7 @@ def apply_model_order(primary, fallbacks):
         subprocess.run(["openclaw", "models", "fallbacks", "add", ref], check=True, capture_output=True, text=True, timeout=90)
 
 def models_set_order():
-    global MODEL_CACHE, MODEL_CACHE_AT
+    global MODEL_CACHE, MODEL_CACHE_AT, MODEL_CACHE_SOURCE_HASH
     primary = P.get("primary", "")
     fallbacks = P.get("fallbacks", [])
     if not valid_model_ref(primary) or not isinstance(fallbacks, list) or len(fallbacks) > 20:
@@ -817,6 +852,7 @@ def models_set_order():
         fail("模型顺序保存失败，已尝试恢复旧顺序：" + redact_cli_error(error), "model_order_failed")
     MODEL_CACHE = snapshot_with_order(before, primary, fallbacks)
     MODEL_CACHE_AT = time.monotonic()
+    MODEL_CACHE_SOURCE_HASH = model_config_source_hash()
     print(json.dumps(MODEL_CACHE, ensure_ascii=False, separators=(",", ":")))
 
 def models_add():
@@ -1142,7 +1178,7 @@ def read_exact_stdin(size):
     return payload
 
 def handle(encoded, binary_payload=None):
-    global P, ROOTS, MODEL_CACHE, MODEL_CACHE_AT, MODEL_CACHE_SCOPE
+    global P, ROOTS, MODEL_CACHE, MODEL_CACHE_AT, MODEL_CACHE_SCOPE, MODEL_CACHE_SOURCE_HASH
     try:
         P = json.loads(base64.b64decode(encoded).decode("utf-8"))
         if P.get("protocolVersion") != PROTOCOL_VERSION:
@@ -1158,6 +1194,7 @@ def handle(encoded, binary_payload=None):
         if MODEL_CACHE_SCOPE != scope:
             MODEL_CACHE = None
             MODEL_CACHE_AT = 0.0
+            MODEL_CACHE_SOURCE_HASH = None
             MODEL_CACHE_SCOPE = scope
         for root in ROOTS.values():
             if not os.path.isabs(root) or not os.path.isdir(root):

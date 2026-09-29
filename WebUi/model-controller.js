@@ -91,34 +91,50 @@
       return value === null || value === undefined || value === '' ? fallback : String(value);
     }
 
+    function modelSignature(model, suffix = '') {
+      return [model.id, model.name, model.provider, model.alias || '', model.status || '',
+        model.latencyMs ?? '', model.lastTestedAtUtc || '', model.lastError || '',
+        model.latencyMeasurement || '', suffix].join('\u001f');
+    }
+
+    function updateOrderRow(row, model, index) {
+      const signature = modelSignature(model, `${index}|${state.saving}|${state.refreshing}`);
+      row.dataset.modelId = model.id;
+      row.draggable = !state.saving && !state.refreshing;
+      if (row.dataset.modelSignature === signature) return;
+      row.setAttribute('aria-label', model.id + '，' + (index === 0 ? '当前模型' : '备选模型 ' + index));
+      row.querySelector('.model-order-index').textContent = String(index + 1);
+      renderProviderMark(row.querySelector('.model-provider-badge'), model, true);
+      row.querySelector('.model-order-main strong').textContent = safeText(model.name, model.id);
+      row.querySelector('.model-order-main small').textContent = model.provider + ' · ' + model.id + (model.alias ? ' · ' + model.alias : '');
+      row.querySelector('.model-order-role').textContent = index === 0 ? '当前' : '备选 ' + index;
+      renderLatency(row.querySelector('.model-latency'), model);
+      row.classList.toggle('model-primary-row', index === 0);
+      row.dataset.virtualKey = String(model.id).toLowerCase();
+      row.dataset.modelSignature = signature;
+    }
+
     function createOrderRow(model, index, total) {
       const row = document.createElement('div');
       row.className = 'model-order-row';
-      row.draggable = !state.saving && !state.refreshing;
-      row.dataset.modelId = model.id;
       row.setAttribute('role', 'option');
-      row.setAttribute('aria-label', model.id + '，' + (index === 0 ? '当前模型' : '备选模型 ' + index));
       row.innerHTML = '<span class="model-drag-handle" title="拖拽调整顺序" aria-hidden="true">⋮⋮</span>' +
         '<span class="model-order-index">' + (index + 1) + '</span>' +
         '<span class="model-provider-badge" aria-hidden="true"></span>' +
         '<span class="model-order-main"><strong></strong><small></small></span>' +
         '<span class="model-order-role"></span>' +
         '<span class="model-latency"></span>';
-      renderProviderMark(row.querySelector('.model-provider-badge'), model, true);
-      row.querySelector('.model-order-main strong').textContent = safeText(model.name, model.id);
-      row.querySelector('.model-order-main small').textContent = model.provider + ' · ' + model.id + (model.alias ? ' · ' + model.alias : '');
-      row.querySelector('.model-order-role').textContent = index === 0 ? '当前' : '备选 ' + index;
-      renderLatency(row.querySelector('.model-latency'), model);
-      if (index === 0) row.classList.add('model-primary-row');
+      updateOrderRow(row, model, index);
       row.addEventListener('dragstart', event => {
         if (state.saving || state.refreshing) { event.preventDefault(); return; }
-        state.draggedId = model.id;
+        state.draggedId = row.dataset.modelId;
         row.classList.add('dragging');
         event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', model.id);
+        event.dataTransfer.setData('text/plain', row.dataset.modelId);
       });
       row.addEventListener('dragover', event => {
-        if (state.saving || state.refreshing || !state.draggedId || state.draggedId === model.id) return;
+        const targetId = row.dataset.modelId;
+        if (state.saving || state.refreshing || !state.draggedId || state.draggedId === targetId) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
         row.classList.add('drop-target');
@@ -127,10 +143,11 @@
       row.addEventListener('drop', event => {
         event.preventDefault();
         row.classList.remove('drop-target');
-        if (state.saving || state.refreshing || !state.draggedId || state.draggedId === model.id) return;
+        const targetId = row.dataset.modelId;
+        if (state.saving || state.refreshing || !state.draggedId || state.draggedId === targetId) return;
         const ids = orderIds(state.snapshot);
         const from = ids.indexOf(state.draggedId);
-        const to = ids.indexOf(model.id);
+        const to = ids.indexOf(targetId);
         if (from < 0 || to < 0) return;
         ids.splice(from, 1);
         ids.splice(to, 0, state.draggedId);
@@ -163,15 +180,51 @@
 
     function renderOrder(snapshot) {
       const list = $('#modelOrderList');
-      list.replaceChildren();
       const models = selectedModels(snapshot);
       if (!models.length) {
+        list.replaceChildren();
         list.className = 'model-order-list empty-state';
         list.textContent = '服务器尚未配置当前模型。';
         return;
       }
       list.className = 'model-order-list';
-      models.forEach((model, index) => list.appendChild(createOrderRow(model, index, models.length)));
+      const existing = new Map([...list.children]
+        .filter(row => row.dataset.modelId)
+        .map(row => [String(row.dataset.modelId).toLowerCase(), row]));
+      const fragment = document.createDocumentFragment();
+      models.forEach((model, index) => {
+        const key = String(model.id).toLowerCase();
+        const row = existing.get(key) || createOrderRow(model, index, models.length);
+        updateOrderRow(row, model, index);
+        fragment.appendChild(row);
+      });
+      // replaceChildren 这里只移动已有节点，未变化的模型行不会重新创建。
+      list.replaceChildren(fragment);
+    }
+
+    function updateAvailableRow(row, model) {
+      const signature = modelSignature(model, `${state.saving}|${state.refreshing}`);
+      row.dataset.modelId = model.id;
+      row.dataset.virtualKey = String(model.id).toLowerCase();
+      if (row.dataset.modelSignature === signature) return;
+      renderProviderMark(row.querySelector('.model-provider-badge'), model, true);
+      row.querySelector('strong').textContent = safeText(model.name, model.id);
+      row.querySelector('small').textContent = model.provider + ' · ' + model.id;
+      renderLatency(row.querySelector('.model-latency'), model);
+      row.querySelector('.model-use-button').disabled = state.saving || state.refreshing;
+      row.dataset.modelSignature = signature;
+    }
+
+    function createAvailableRow(model) {
+      const row = document.createElement('div');
+      row.className = 'model-available-row';
+      row.innerHTML = '<span class="model-provider-badge" aria-hidden="true"></span><span class="model-available-main"><strong></strong><small></small></span><span class="model-latency"></span><button class="button button-quiet model-use-button" type="button">加入备选</button>';
+      row.querySelector('.model-use-button').addEventListener('click', () => {
+        const id = row.dataset.modelId;
+        if (id) persistOrder([...orderIds(state.snapshot), id]);
+      });
+      updateAvailableRow(row, model);
+      return row;
     }
 
     function renderAvailable(snapshot) {
@@ -206,29 +259,35 @@
           removeFallback(draggedId);
         });
       }
-      list.replaceChildren();
       const selected = new Set(selectedModels(snapshot).map(model => String(model.id || '').toLowerCase()));
       const models = (snapshot && snapshot.available || []).filter(model => {
         const id = String(model && model.id || '').toLowerCase();
         return id && !selected.has(id);
       });
       if (!models.length) {
+        list.replaceChildren();
         list.className = 'model-available-list empty-state';
         list.textContent = '没有其它已发现模型；可将备选模型拖到这里移除。';
         return;
       }
       list.className = 'model-available-list';
+      if (models.length > 80 && window.OpenClawVirtualList) {
+        if (!list._virtualModelList) list._virtualModelList = window.OpenClawVirtualList.create(list, { rowHeight: 52, threshold: 80 });
+        list._virtualModelList.setItems(models, createAvailableRow, updateAvailableRow);
+        return;
+      }
+      if (list._virtualModelList) list._virtualModelList.clear();
+      const existing = new Map([...list.children]
+        .filter(row => row.dataset.modelId)
+        .map(row => [String(row.dataset.modelId).toLowerCase(), row]));
+      const fragment = document.createDocumentFragment();
       models.forEach(model => {
-        const row = document.createElement('div');
-        row.className = 'model-available-row';
-        row.innerHTML = '<span class="model-provider-badge" aria-hidden="true"></span><span class="model-available-main"><strong></strong><small></small></span><span class="model-latency"></span><button class="button button-quiet model-use-button" type="button">加入备选</button>';
-        renderProviderMark(row.querySelector('.model-provider-badge'), model, true);
-        row.querySelector('strong').textContent = safeText(model.name, model.id);
-        row.querySelector('small').textContent = model.provider + ' · ' + model.id;
-        renderLatency(row.querySelector('.model-latency'), model);
-        row.querySelector('.model-use-button').addEventListener('click', () => persistOrder([...orderIds(state.snapshot), model.id]));
-        list.appendChild(row);
+        const key = String(model.id).toLowerCase();
+        const row = existing.get(key) || createAvailableRow(model);
+        updateAvailableRow(row, model);
+        fragment.appendChild(row);
       });
+      list.replaceChildren(fragment);
     }
     function render() {
       const snapshot = state.snapshot;

@@ -18,6 +18,8 @@ public sealed class ModelService : IDisposable
     private readonly object _cacheGate = new();
     private RemoteModelSnapshot? _cachedSnapshot;
     private DateTimeOffset _cachedSavedAtUtc;
+    private DateTimeOffset _cachedExpiresAtUtc;
+    private ModelSnapshotCacheEntry? _cachedEntry;
     private string? _cachedScope;
     private Task<RemoteModelSnapshot>? _refreshTask;
     private CancellationTokenSource _refreshCancellation = new();
@@ -122,7 +124,19 @@ public sealed class ModelService : IDisposable
         {
             var results = await _remote.TestLatencyAsync(_settings(), models, cancellationToken);
             _latencies.Merge(results);
-            var snapshot = _latencies.Apply(await _remote.GetSnapshotAsync(_settings(), cancellationToken));
+            var cachedBeforeTest = GetCachedEntry(CreateScopeKey(_settings()));
+            var fetched = await _remote.GetSnapshotAsync(
+                _settings(),
+                cachedBeforeTest?.Snapshot.ConfigHash,
+                cancellationToken);
+            var fetchedSnapshot = fetched.Unchanged && cachedBeforeTest is not null
+                ? cachedBeforeTest.Snapshot with
+                {
+                    RetrievedAtUtc = fetched.Snapshot.RetrievedAtUtc,
+                    ConfigHash = fetched.Snapshot.ConfigHash ?? cachedBeforeTest.Snapshot.ConfigHash
+                }
+                : fetched.Snapshot;
+            var snapshot = _latencies.Apply(fetchedSnapshot);
             var cached = CacheSnapshot(CreateScopeKey(_settings()), snapshot);
             return new
             {
@@ -130,6 +144,7 @@ public sealed class ModelService : IDisposable
                 snapshot.Fallbacks,
                 snapshot.Available,
                 snapshot.RetrievedAtUtc,
+                snapshot.ConfigHash,
                 cacheSource = "remote",
                 cacheSavedAtUtc = cached.SavedAtUtc,
                 refreshPending = false,
@@ -185,12 +200,22 @@ public sealed class ModelService : IDisposable
         lock (_cacheGate)
         {
             if (_cachedSnapshot is not null && string.Equals(_cachedScope, scope, StringComparison.Ordinal))
-                return new ModelSnapshotCacheEntry(_cachedSnapshot, _cachedSavedAtUtc);
+            {
+                if (_cachedExpiresAtUtc > DateTimeOffset.UtcNow)
+                    return _cachedEntry;
+                _cachedSnapshot = null;
+                _cachedSavedAtUtc = default;
+                _cachedExpiresAtUtc = default;
+                _cachedEntry = null;
+                _cachedScope = null;
+            }
 
             var persisted = _snapshotStore.Get(scope);
             if (persisted is null) return null;
             _cachedSnapshot = persisted.Snapshot;
             _cachedSavedAtUtc = persisted.SavedAtUtc;
+            _cachedExpiresAtUtc = persisted.ExpiresAtUtc;
+            _cachedEntry = persisted;
             _cachedScope = scope;
             return persisted;
         }
@@ -203,6 +228,8 @@ public sealed class ModelService : IDisposable
         {
             _cachedSnapshot = snapshot;
             _cachedSavedAtUtc = cached.SavedAtUtc;
+            _cachedExpiresAtUtc = cached.ExpiresAtUtc;
+            _cachedEntry = cached;
             _cachedScope = scope;
         }
         return cached;
@@ -240,7 +267,15 @@ public sealed class ModelService : IDisposable
             _setBusy(true);
             try
             {
-                var snapshot = await _remote.GetSnapshotAsync(settings, cancellationToken);
+                var cached = GetCachedEntry(scope);
+                var fetched = await _remote.GetSnapshotAsync(settings, cached?.Snapshot.ConfigHash, cancellationToken);
+                var snapshot = fetched.Unchanged && cached is not null
+                    ? cached.Snapshot with
+                    {
+                        RetrievedAtUtc = fetched.Snapshot.RetrievedAtUtc,
+                        ConfigHash = fetched.Snapshot.ConfigHash ?? cached.Snapshot.ConfigHash
+                    }
+                    : fetched.Snapshot;
                 lock (_cacheGate)
                 {
                     if (generation != _refreshGeneration || !string.Equals(_refreshScope, scope, StringComparison.Ordinal))
@@ -267,6 +302,8 @@ public sealed class ModelService : IDisposable
         {
             _cachedSnapshot = null;
             _cachedSavedAtUtc = default;
+            _cachedExpiresAtUtc = default;
+            _cachedEntry = null;
             _cachedScope = null;
             _refreshTask = null;
             _refreshScope = null;
@@ -289,6 +326,7 @@ public sealed class ModelService : IDisposable
         snapshot.Fallbacks,
         snapshot.Available,
         snapshot.RetrievedAtUtc,
+        snapshot.ConfigHash,
         cacheSource,
         cacheSavedAtUtc,
         refreshPending,

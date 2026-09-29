@@ -2,49 +2,63 @@
   'use strict';
   function create(deps) {
     const { $, state, sizeLabel, setDirtyState, setStatus, showToast, reportError, review, bridgeCall, setBusy, syncRenameButton, loadStickerImage, loadStickerThumbnail, moveStickerImageCache, getThumbnailObserver } = deps;
+  function createStickerCard(row) {
+    const card = document.createElement('div');
+    card.className = 'sticker-row' + (state.current === row.imagePath ? ' selected' : '');
+    card.dataset.virtualKey = String(row.imagePath).toLowerCase();
+    const thumb = document.createElement('div'); thumb.className = 'sticker-thumb';
+    const fallback = document.createElement('span'); fallback.className = 'sticker-thumb-fallback'; fallback.textContent = fileIsGif(row.imagePath) ? 'GIF' : '☺';
+    const thumbnail = document.createElement('img'); thumbnail.className = 'sticker-thumb-image'; thumbnail.alt = ''; thumbnail.decoding = 'async'; thumbnail._stickerRow = row;
+    thumb.append(fallback, thumbnail);
+    const main = document.createElement('div'); main.className = 'sticker-row-main';
+    const title = document.createElement('div'); title.className = 'sticker-row-title'; title.textContent = row.imagePath;
+    const meta = document.createElement('div'); meta.className = 'sticker-row-meta'; meta.textContent = row.id + (row.tagsText ? ' · ' + row.tagsText : ' · 无标签');
+    const tags = document.createElement('input'); tags.className = 'sticker-tags-input'; tags.type = 'text'; tags.value = row.tagsText || ''; tags.placeholder = row.catalogued && state.editingEnabled ? '输入标签…' : '尚未登记目录'; tags.disabled = !state.editingEnabled || row.catalogued === false; tags.setAttribute('aria-label', '标签 ' + row.imagePath);
+    const controls = document.createElement('div'); controls.className = 'sticker-row-controls'; controls.append(tags);
+    const weightLabel = document.createElement('label'); weightLabel.className = 'sticker-weight-control';
+    const weightCaption = document.createElement('span'); weightCaption.textContent = '权重';
+    const weightInput = document.createElement('input'); weightInput.className = 'sticker-weight-input'; weightInput.type = 'number'; weightInput.min = '0'; weightInput.max = '1000000'; weightInput.step = 'any'; weightInput.required = true; weightInput.value = String(Number.isFinite(Number(row.weight)) ? Number(row.weight) : 1); weightInput.disabled = !state.editingEnabled || row.catalogued === false; weightInput.setAttribute('aria-label', '表情包选择权重 ' + row.imagePath); weightInput.title = '0 表示不参与抽取；权重越大，在语境合适的候选中被抽中的概率越高。';
+    weightLabel.append(weightCaption, weightInput); controls.append(weightLabel);
+    tags.addEventListener('input', () => {
+      row.tagsText = tags.value;
+      meta.textContent = row.id + (tags.value ? ' · ' + tags.value : ' · 无标签');
+      updateStickerDirty();
+    });
+    weightInput.addEventListener('input', () => {
+      const weight = weightInput.valueAsNumber;
+      row.weightInvalid = !weightInput.value || !weightInput.validity.valid || !Number.isFinite(weight) || weight < 0 || weight > 1000000;
+      if (!row.weightInvalid) row.weight = weight;
+      updateStickerDirty();
+    });
+    card.addEventListener('click', event => { if (!controls.contains(event.target)) selectSticker(row); });
+    main.append(title, meta, controls); card.append(thumb, main);
+    if (getThumbnailObserver()) getThumbnailObserver().observe(thumbnail); else loadStickerThumbnail(row, thumbnail);
+    return card;
+  }
+
   function renderStickerList() {
     const list = $('#stickerList');
     const query = $('#stickerSearch').value.trim().toLowerCase();
     const filtered = state.rows.filter(row => row.imagePath.toLowerCase().includes(query) || (row.tagsText || '').toLowerCase().includes(query));
     $('#stickerListCount').textContent = filtered.length;
-    list.replaceChildren();
     if (!filtered.length) {
+      if (list._virtualStickerList) list._virtualStickerList.clear();
       list.classList.add('empty-state');
       list.textContent = state.rows.length ? '没有匹配的图片' : '连接服务器后读取表情包';
       return;
     }
     list.classList.remove('empty-state');
-    filtered.forEach(row => {
-      const card = document.createElement('div');
-      card.className = 'sticker-row' + (state.current === row.imagePath ? ' selected' : '');
-      const thumb = document.createElement('div'); thumb.className = 'sticker-thumb';
-      const fallback = document.createElement('span'); fallback.className = 'sticker-thumb-fallback'; fallback.textContent = fileIsGif(row.imagePath) ? 'GIF' : '☺';
-      const thumbnail = document.createElement('img'); thumbnail.className = 'sticker-thumb-image'; thumbnail.alt = ''; thumbnail.decoding = 'async'; thumbnail._stickerRow = row;
-      thumb.append(fallback, thumbnail);
-      const main = document.createElement('div'); main.className = 'sticker-row-main';
-      const title = document.createElement('div'); title.className = 'sticker-row-title'; title.textContent = row.imagePath;
-      const meta = document.createElement('div'); meta.className = 'sticker-row-meta'; meta.textContent = row.id + (row.tagsText ? ' · ' + row.tagsText : ' · 无标签');
-      const tags = document.createElement('input'); tags.className = 'sticker-tags-input'; tags.type = 'text'; tags.value = row.tagsText || ''; tags.placeholder = row.catalogued && state.editingEnabled ? '输入标签…' : '尚未登记目录'; tags.disabled = !state.editingEnabled || row.catalogued === false; tags.setAttribute('aria-label', '标签 ' + row.imagePath);
-      const controls = document.createElement('div'); controls.className = 'sticker-row-controls'; controls.append(tags);
-      const weightLabel = document.createElement('label'); weightLabel.className = 'sticker-weight-control';
-      const weightCaption = document.createElement('span'); weightCaption.textContent = '权重';
-      const weightInput = document.createElement('input'); weightInput.className = 'sticker-weight-input'; weightInput.type = 'number'; weightInput.min = '0'; weightInput.max = '1000000'; weightInput.step = 'any'; weightInput.required = true; weightInput.value = String(Number.isFinite(Number(row.weight)) ? Number(row.weight) : 1); weightInput.disabled = !state.editingEnabled || row.catalogued === false; weightInput.setAttribute('aria-label', '表情包选择权重 ' + row.imagePath); weightInput.title = '0 表示不参与抽取；权重越大，在语境合适的候选中被抽中的概率越高。';
-      weightLabel.append(weightCaption, weightInput); controls.append(weightLabel);
-      tags.addEventListener('input', () => {
-        row.tagsText = tags.value;
-        meta.textContent = row.id + (tags.value ? ' · ' + tags.value : ' · 无标签');
-        updateStickerDirty();
+    if (filtered.length > 80 && window.OpenClawVirtualList) {
+      if (!list._virtualStickerList) list._virtualStickerList = window.OpenClawVirtualList.create(list, { rowHeight: 126, threshold: 80 });
+      list._virtualStickerList.setItems(filtered, createStickerCard, card => {
+        card.classList.toggle('selected', card.dataset.virtualKey === String(state.current || '').toLowerCase());
       });
-      weightInput.addEventListener('input', () => {
-        const weight = weightInput.valueAsNumber;
-        row.weightInvalid = !weightInput.value || !weightInput.validity.valid || !Number.isFinite(weight) || weight < 0 || weight > 1000000;
-        if (!row.weightInvalid) row.weight = weight;
-        updateStickerDirty();
-      });
-      card.addEventListener('click', event => { if (!controls.contains(event.target)) selectSticker(row); });
-      main.append(title, meta, controls); card.append(thumb, main); list.append(card);
-      if (getThumbnailObserver()) getThumbnailObserver().observe(thumbnail); else loadStickerThumbnail(row, thumbnail);
-    });
+      return;
+    }
+    if (list._virtualStickerList) list._virtualStickerList.clear();
+    const fragment = document.createDocumentFragment();
+    filtered.forEach(row => fragment.appendChild(createStickerCard(row)));
+    list.replaceChildren(fragment);
   }
 
   function snapshotStickerRows() {

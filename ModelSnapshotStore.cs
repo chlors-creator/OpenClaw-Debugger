@@ -1,18 +1,24 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace OpenClawDebugger;
 
 internal sealed record ModelSnapshotCacheEntry(
     RemoteModelSnapshot Snapshot,
-    DateTimeOffset SavedAtUtc);
+    DateTimeOffset SavedAtUtc,
+    DateTimeOffset ExpiresAtUtc,
+    int FormatVersion,
+    string PayloadSha256);
 
 /// <summary>
 /// 持久化模型清单，不保存 API 密钥或模型响应内容。
-/// 每个连接作用域使用独立哈希键，避免切换服务器时串用清单。
+/// 缓存记录带格式版本、TTL 和内容校验，损坏或过期时会自动清理。
 /// </summary>
 internal sealed class ModelSnapshotStore
 {
+    private const int CacheFormatVersion = 1;
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true,
@@ -34,13 +40,26 @@ internal sealed class ModelSnapshotStore
     {
         lock (_gate)
         {
-            return _entries.TryGetValue(scope, out var entry) ? entry : null;
+            if (!_entries.TryGetValue(scope, out var entry)) return null;
+            if (IsValid(entry) && entry.ExpiresAtUtc > DateTimeOffset.UtcNow) return entry;
+
+            // 只要某个连接作用域的记录失效，就移除它；若文件本身无法解析，
+            // Load 已经删除整个文件，下一次读取会重新建立干净缓存。
+            _entries.Remove(scope);
+            SaveLocked();
+            return null;
         }
     }
 
     public ModelSnapshotCacheEntry Save(string scope, RemoteModelSnapshot snapshot)
     {
-        var entry = new ModelSnapshotCacheEntry(snapshot, DateTimeOffset.UtcNow);
+        var savedAt = DateTimeOffset.UtcNow;
+        var entry = new ModelSnapshotCacheEntry(
+            snapshot,
+            savedAt,
+            savedAt + CacheTtl,
+            CacheFormatVersion,
+            ComputePayloadSha256(snapshot));
         lock (_gate)
         {
             _entries[scope] = entry;
@@ -63,18 +82,52 @@ internal sealed class ModelSnapshotStore
     {
         try
         {
-            if (!File.Exists(_path)) return new(StringComparer.Ordinal);
+            if (!File.Exists(_path)) return NewDictionary();
             var loaded = JsonSerializer.Deserialize<Dictionary<string, ModelSnapshotCacheEntry>>(
                 File.ReadAllText(_path), JsonOptions);
-            return loaded is null
-                ? new(StringComparer.Ordinal)
-                : new Dictionary<string, ModelSnapshotCacheEntry>(loaded, StringComparer.Ordinal);
+            if (loaded is null) return NewDictionary();
+
+            var result = new Dictionary<string, ModelSnapshotCacheEntry>(StringComparer.Ordinal);
+            foreach (var pair in loaded)
+            {
+                if (!IsValid(pair.Value) || pair.Value.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+                    continue;
+                result[pair.Key] = pair.Value;
+            }
+            if (result.Count != loaded.Count)
+            {
+                // 旧格式、过期记录或校验不一致的记录不再保留。
+                if (result.Count == 0) TryDeleteCacheFile();
+                else
+                {
+                    _entries = result;
+                    SaveLocked();
+                }
+            }
+            return result;
         }
-        catch (Exception ex) when (ex is IOException or JsonException)
+        catch (Exception ex) when (ex is IOException or JsonException or NotSupportedException)
         {
-            return new(StringComparer.Ordinal);
+            TryDeleteCacheFile();
+            return NewDictionary();
         }
     }
+
+    private bool IsValid(ModelSnapshotCacheEntry entry)
+    {
+        if (entry.Snapshot is null || entry.Snapshot.Fallbacks is null || entry.Snapshot.Available is null ||
+            entry.FormatVersion != CacheFormatVersion || string.IsNullOrWhiteSpace(entry.PayloadSha256)) return false;
+        return string.Equals(entry.PayloadSha256, ComputePayloadSha256(entry.Snapshot), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ComputePayloadSha256(RemoteModelSnapshot snapshot)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions);
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+    }
+
+    private static Dictionary<string, ModelSnapshotCacheEntry> NewDictionary() =>
+        new(StringComparer.Ordinal);
 
     private void SaveLocked()
     {
@@ -88,5 +141,10 @@ internal sealed class ModelSnapshotStore
         {
             try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
         }
+    }
+
+    private void TryDeleteCacheFile()
+    {
+        try { if (File.Exists(_path)) File.Delete(_path); } catch { }
     }
 }

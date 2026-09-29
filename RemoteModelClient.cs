@@ -26,7 +26,10 @@ public sealed record RemoteModelSnapshot(
     RemoteModelInfo? Primary,
     IReadOnlyList<RemoteModelInfo> Fallbacks,
     IReadOnlyList<RemoteModelInfo> Available,
-    DateTimeOffset RetrievedAtUtc);
+    DateTimeOffset RetrievedAtUtc,
+    string? ConfigHash = null);
+
+public sealed record RemoteModelFetchResult(RemoteModelSnapshot Snapshot, bool Unchanged);
 
 public sealed record RemoteModelAddRequest(
     string ModelRef,
@@ -37,7 +40,7 @@ public sealed record RemoteModelAddRequest(
 
 public interface IRemoteModelClient
 {
-    Task<RemoteModelSnapshot> GetSnapshotAsync(ConnectionSettings settings, CancellationToken cancellationToken = default);
+    Task<RemoteModelFetchResult> GetSnapshotAsync(ConnectionSettings settings, string? knownConfigHash = null, CancellationToken cancellationToken = default);
     Task<RemoteModelSnapshot> SetOrderAsync(ConnectionSettings settings, string primary, IReadOnlyList<string> fallbacks, CancellationToken cancellationToken = default);
     Task<RemoteModelSnapshot> AddModelAsync(ConnectionSettings settings, RemoteModelAddRequest request, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<RemoteModelLatencyResult>> TestLatencyAsync(ConnectionSettings settings, IReadOnlyList<string> modelIds, CancellationToken cancellationToken = default);
@@ -50,13 +53,20 @@ public sealed class RemoteModelClient : IRemoteModelClient
 
     public RemoteModelClient(RemoteOpenClawClient remote) => _remote = remote;
 
-    public async Task<RemoteModelSnapshot> GetSnapshotAsync(ConnectionSettings settings, CancellationToken cancellationToken = default)
+    public async Task<RemoteModelFetchResult> GetSnapshotAsync(
+        ConnectionSettings settings,
+        string? knownConfigHash = null,
+        CancellationToken cancellationToken = default)
     {
+        var request = new JsonObject { ["action"] = "models_inventory" };
+        if (!string.IsNullOrWhiteSpace(knownConfigHash)) request["knownConfigHash"] = knownConfigHash;
         var response = await _remote.InvokeModelAsync(
             settings,
-            new JsonObject { ["action"] = "models_inventory" },
+            request,
             cancellationToken);
-        return ParseSnapshot(response);
+        return new RemoteModelFetchResult(
+            ParseSnapshot(response),
+            response["unchanged"] is JsonValue unchanged && unchanged.TryGetValue<bool>(out var value) && value);
     }
 
     public async Task<RemoteModelSnapshot> SetOrderAsync(
@@ -126,7 +136,7 @@ public sealed class RemoteModelClient : IRemoteModelClient
         var fallbacks = ParseModels(response["fallbacks"]?.AsArray());
         var available = ParseModels(response["available"]?.AsArray());
         var retrieved = ParseDateTime(GetString(response["retrievedAtUtc"])) ?? DateTimeOffset.UtcNow;
-        return new RemoteModelSnapshot(primary, fallbacks, available, retrieved);
+        return new RemoteModelSnapshot(primary, fallbacks, available, retrieved, GetString(response["configHash"]));
     }
 
     private static IReadOnlyList<RemoteModelInfo> ParseModels(JsonArray? array)
