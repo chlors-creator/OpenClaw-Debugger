@@ -92,7 +92,7 @@
     function createOrderRow(model, index, total) {
       const row = document.createElement('div');
       row.className = 'model-order-row';
-      row.draggable = !state.saving;
+      row.draggable = !state.saving && !state.refreshing;
       row.dataset.modelId = model.id;
       row.setAttribute('role', 'option');
       row.setAttribute('aria-label', model.id + '，' + (index === 0 ? '当前模型' : '备选模型 ' + index));
@@ -109,14 +109,14 @@
       renderLatency(row.querySelector('.model-latency'), model);
       if (index === 0) row.classList.add('model-primary-row');
       row.addEventListener('dragstart', event => {
-        if (state.saving) { event.preventDefault(); return; }
+        if (state.saving || state.refreshing) { event.preventDefault(); return; }
         state.draggedId = model.id;
         row.classList.add('dragging');
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData('text/plain', model.id);
       });
       row.addEventListener('dragover', event => {
-        if (state.saving || !state.draggedId || state.draggedId === model.id) return;
+        if (state.saving || state.refreshing || !state.draggedId || state.draggedId === model.id) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
         row.classList.add('drop-target');
@@ -125,7 +125,7 @@
       row.addEventListener('drop', event => {
         event.preventDefault();
         row.classList.remove('drop-target');
-        if (state.saving || !state.draggedId || state.draggedId === model.id) return;
+        if (state.saving || state.refreshing || !state.draggedId || state.draggedId === model.id) return;
         const ids = orderIds(state.snapshot);
         const from = ids.indexOf(state.draggedId);
         const to = ids.indexOf(model.id);
@@ -204,7 +204,15 @@
       renderAvailable(snapshot);
       const count = selectedModels(snapshot).length;
       $('#modelOrderCount').textContent = count ? count + ' 个已选模型' : '未配置';
-      $('#modelRetrievedAt').textContent = snapshot && snapshot.retrievedAtUtc ? '读取于 ' + new Date(snapshot.retrievedAtUtc).toLocaleString() : '尚未读取';
+      if (snapshot && snapshot.cacheSource === 'cache' && snapshot.cacheSavedAtUtc) {
+        $('#modelRetrievedAt').textContent = '缓存于 ' + new Date(snapshot.cacheSavedAtUtc).toLocaleString();
+      }
+      else if (snapshot && snapshot.retrievedAtUtc) {
+        $('#modelRetrievedAt').textContent = '更新于 ' + new Date(snapshot.retrievedAtUtc).toLocaleString();
+      }
+      else {
+        $('#modelRetrievedAt').textContent = '尚未读取';
+      }
       syncButtons();
     }
 
@@ -245,11 +253,11 @@
       const connected = isConnected();
       const testButton = $('#testModelLatencyButton');
       const canTest = allModelIds(state.snapshot).length > 0;
-      testButton.disabled = !connected || state.loading || state.saving || state.adding || (!state.testing && !canTest);
+      testButton.disabled = !connected || state.loading || state.refreshing || state.saving || state.adding || (!state.testing && !canTest);
       testButton.innerHTML = state.testing ? '✕ <span>取消测试</span>' : '◌ <span>测试延迟</span>';
       testButton.title = state.testing ? '取消当前模型延迟测试' : '一次性测试当前、备选和全部可用模型，最多 10 个并发';
-      $('#addModelButton').disabled = !connected || state.loading || state.testing || state.saving || state.adding;
-      document.body.classList.toggle('model-operation-active', state.testing || state.saving || state.adding);
+      $('#addModelButton').disabled = !connected || state.loading || state.refreshing || state.testing || state.saving || state.adding;
+      document.body.classList.toggle('model-operation-active', state.refreshing || state.testing || state.saving || state.adding);
       if (state.loading) {
         const phaseText = {
           status: '正在读取当前模型……',
@@ -258,11 +266,68 @@
         };
         $('#modelLatencyStatus').textContent = phaseText[state.loadPhase] || '正在读取服务器模型配置……';
       }
+      else if (state.refreshing) $('#modelLatencyStatus').textContent = '缓存已加载，正在更新模型列表……';
       else if (state.testing) $('#modelLatencyStatus').textContent = '正在并发探测模型首响应（最多 10 个同时进行）…';
       else if (state.saving) $('#modelLatencyStatus').textContent = state.pendingOrder ? '正在保存当前顺序，下一次加入已排队…' : '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
       else if (!state.snapshot) $('#modelLatencyStatus').textContent = connected ? '点击“测试延迟”或加载模型配置。' : '连接服务器后读取模型配置。';
+      else if (state.snapshot && state.snapshot.refreshError) $('#modelLatencyStatus').textContent = '模型缓存已加载，最新清单更新失败，已保留缓存。';
       else $('#modelLatencyStatus').textContent = '';
+    }
+
+    function applySnapshot(snapshot) {
+      state.snapshot = snapshot;
+      state.snapshotCachedAt = Date.now();
+      state.cacheSource = snapshot && snapshot.cacheSource ? snapshot.cacheSource : 'remote';
+      state.cacheSavedAtUtc = snapshot && snapshot.cacheSavedAtUtc ? snapshot.cacheSavedAtUtc : null;
+    }
+
+    function refreshFromServer() {
+      if (!isConnected()) return Promise.resolve(null);
+      if (state.refreshPromise) return state.refreshPromise;
+      const controller = new AbortController();
+      const generation = ++state.refreshGeneration;
+      state.refreshController = controller;
+      state.refreshing = true;
+      syncButtons();
+      render();
+      let operation;
+      operation = (async () => {
+        try {
+          const snapshot = await bridgeCall('getModels', { waitForUpdate: true }, { signal: controller.signal });
+          if (generation !== state.refreshGeneration || controller.signal.aborted) return null;
+          applySnapshot(snapshot);
+          render();
+          if (snapshot && snapshot.refreshError) {
+            setStatus('模型缓存已加载，但最新清单更新失败，已保留缓存。', true);
+            showToast('模型清单更新失败，已保留缓存。', true);
+          }
+          else setStatus('模型清单已更新。');
+          return snapshot;
+        } catch (error) {
+          if (!controller.signal.aborted && !(error && error.name === 'AbortError')) {
+            const message = error && error.message ? error.message : String(error);
+            if (state.snapshot) {
+              state.snapshot = { ...state.snapshot, refreshError: message };
+              render();
+              setStatus('模型缓存已加载，但最新清单更新失败，已保留缓存。', true);
+              showToast('模型清单更新失败，已保留缓存。', true);
+            }
+            else reportError(error);
+          }
+          return null;
+        } finally {
+          if (state.refreshController === controller) state.refreshController = null;
+          if (state.refreshPromise === operation) state.refreshPromise = null;
+          if (generation === state.refreshGeneration) {
+            state.refreshing = false;
+            syncButtons();
+            render();
+          }
+        }
+      })();
+      state.refreshPromise = operation;
+      return operation;
     }
 
     function load() {
@@ -280,12 +345,13 @@
       scheduleLoadPhases();
       syncButtons();
       let operation;
+      let shouldRefresh = false;
       operation = (async () => {
         try {
           const snapshot = await bridgeCall('getModels', {}, { signal: controller.signal });
           if (generation !== state.loadGeneration || controller.signal.aborted) return null;
-          state.snapshot = snapshot;
-          state.snapshotCachedAt = Date.now();
+          applySnapshot(snapshot);
+          shouldRefresh = Boolean(snapshot && snapshot.refreshPending);
           state.loadPhase = 'organize';
           render();
           // 给“整理模型列表”阶段一个可见的渲染机会，再结束读取状态。
@@ -302,6 +368,7 @@
             state.loading = false;
             state.loadPhase = '';
             syncButtons();
+            if (shouldRefresh && isConnected()) window.setTimeout(() => refreshFromServer(), 0);
           }
         }
       })();
@@ -327,7 +394,7 @@
     }
 
     async function persistOrder(ids) {
-      if (!isConnected() || !Array.isArray(ids) || ids.length < 1) return;
+      if (!isConnected() || state.refreshing || !Array.isArray(ids) || ids.length < 1) return;
       const previous = state.snapshot;
       const ordered = resolveOrder(previous, ids);
       if (!ordered) { await load(); return; }
@@ -352,7 +419,7 @@
       try {
         const result = await bridgeCall('setModelOrder', { primary: ids[0], fallbacks: ids.slice(1) }, { signal: controller.signal });
         if (generation !== state.orderGeneration || controller.signal.aborted) return;
-        state.snapshot = result;
+        applySnapshot(result);
         render();
         setStatus('模型选择顺序已自动保存到服务器。');
         showToast('模型顺序已保存。');
@@ -376,6 +443,7 @@
     }
     async function testLatency() {
       if (!isConnected()) return;
+      if (state.refreshing) return;
       if (state.testing) {
         cancelLatencyTest();
         return;
@@ -391,8 +459,7 @@
       try {
         const result = await bridgeCall('testModelLatency', { models }, { signal: controller.signal });
         if (generation !== state.testGeneration || controller.signal.aborted) return;
-        state.snapshot = result;
-        state.snapshotCachedAt = Date.now();
+        applySnapshot(result);
         render();
         setStatus('模型延迟测试完成。');
         showToast('模型延迟测试完成。');
@@ -405,14 +472,14 @@
     }
 
     function openAddDialog() {
-      if (!isConnected() || state.adding) return;
+      if (!isConnected() || state.refreshing || state.adding) return;
       $('#modelAddForm').reset();
       $('#modelAddDialog').showModal();
       $('#modelRefInput').focus();
     }
 
     async function submitAdd() {
-      if (!isConnected() || state.adding) return;
+      if (!isConnected() || state.refreshing || state.adding) return;
       const payload = {
         modelRef: $('#modelRefInput').value.trim(),
         displayName: $('#modelDisplayNameInput').value.trim(),
@@ -429,8 +496,7 @@
       try {
         const result = await bridgeCall('addModel', payload, { signal: controller.signal });
         if (generation !== state.addGeneration || controller.signal.aborted) return;
-        state.snapshot = result;
-        state.snapshotCachedAt = Date.now();
+        applySnapshot(result);
         $('#modelAddDialog').close('saved');
         render();
         setStatus('新模型已登记，可拖到当前模型或备选列表。');
@@ -448,10 +514,12 @@
       state.testGeneration++;
       state.orderGeneration++;
       state.addGeneration++;
-      state.loadController?.abort(); state.testController?.abort(); state.orderController?.abort(); state.addController?.abort();
+      state.refreshGeneration++;
+      state.loadController?.abort(); state.refreshController?.abort(); state.testController?.abort(); state.orderController?.abort(); state.addController?.abort();
       clearLoadPhaseTimer();
-      state.loadPromise = null;
-      state.snapshot = null; state.snapshotCachedAt = 0; state.loading = false; state.loadPhase = ''; state.testing = false; state.saving = false; state.adding = false;
+      state.loadPromise = null; state.refreshPromise = null;
+      state.snapshot = null; state.snapshotCachedAt = 0; state.cacheSource = ''; state.cacheSavedAtUtc = null;
+      state.loading = false; state.refreshing = false; state.loadPhase = ''; state.testing = false; state.saving = false; state.adding = false;
       state.draggedId = null; state.pendingOrder = null;
       render();
     }

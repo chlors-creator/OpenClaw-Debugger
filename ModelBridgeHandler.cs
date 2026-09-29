@@ -11,7 +11,7 @@ public sealed class ModelBridgeHandler
 
     public void Register(BridgeCommandRouter router)
     {
-        router.Map("getModels", async (_, cancellationToken) => await Require().GetAsync(cancellationToken));
+        router.Map("getModels", async (payload, cancellationToken) => await Require().GetAsync(payload, cancellationToken));
         router.Map("testModelLatency", async (payload, cancellationToken) => await Require().TestLatencyAsync(payload, cancellationToken));
         router.Map("setModelOrder", async (payload, cancellationToken) => await Require().SetOrderAsync(payload, cancellationToken));
         router.Map("addModel", async (payload, cancellationToken) => await Require().AddAsync(payload, cancellationToken));

@@ -1,4 +1,6 @@
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace OpenClawDebugger;
@@ -6,16 +8,21 @@ namespace OpenClawDebugger;
 /// <summary>模型页的校验、排序、延迟测试和添加模型业务。</summary>
 public sealed class ModelService : IDisposable
 {
-    private static readonly TimeSpan SnapshotCacheLifetime = TimeSpan.FromSeconds(30);
     private readonly IRemoteModelClient _remote;
     private readonly Func<ConnectionSettings> _settings;
     private readonly Func<bool> _isConnected;
     private readonly Action<bool> _setBusy;
     private readonly ModelLatencyStore _latencies;
+    private readonly ModelSnapshotStore _snapshotStore;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _cacheGate = new();
     private RemoteModelSnapshot? _cachedSnapshot;
-    private DateTimeOffset _cachedAtUtc;
+    private DateTimeOffset _cachedSavedAtUtc;
+    private string? _cachedScope;
+    private Task<RemoteModelSnapshot>? _refreshTask;
+    private CancellationTokenSource _refreshCancellation = new();
+    private string? _refreshScope;
+    private long _refreshGeneration;
     private bool _disposed;
 
     public ModelService(
@@ -30,22 +37,68 @@ public sealed class ModelService : IDisposable
         _isConnected = isConnected;
         _setBusy = setBusy;
         _latencies = new ModelLatencyStore(privateDirectory);
+        _snapshotStore = new ModelSnapshotStore(privateDirectory);
     }
 
-    public async Task<object> GetAsync(CancellationToken cancellationToken = default)
+    public async Task<object> GetAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken);
-        try
+        EnsureConnected();
+        var settings = _settings();
+        var scope = CreateScopeKey(settings);
+        var waitForUpdate = payload.TryGetProperty("waitForUpdate", out var waitValue) &&
+            waitValue.ValueKind is JsonValueKind.True;
+
+        if (waitForUpdate)
         {
-            var snapshot = GetCachedSnapshot();
-            if (snapshot is null)
+            var refresh = EnsureRefresh(settings, scope);
+            try
             {
-                snapshot = await _remote.GetSnapshotAsync(_settings(), cancellationToken);
-                CacheSnapshot(snapshot);
+                var snapshot = await refresh.WaitAsync(cancellationToken);
+                var saved = GetCachedEntry(scope);
+                return ToResponse(
+                    _latencies.Apply(snapshot),
+                    "remote",
+                    saved?.SavedAtUtc,
+                    false,
+                    null);
             }
-            return ToResponse(_latencies.Apply(snapshot));
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (GetCachedEntry(scope) is not null)
+            {
+                var cached = GetCachedEntry(scope)!;
+                return ToResponse(
+                    _latencies.Apply(cached.Snapshot),
+                    "cache",
+                    cached.SavedAtUtc,
+                    false,
+                    ex.Message);
+            }
         }
-        finally { _setBusy(false); _gate.Release(); }
+
+        var cachedEntry = GetCachedEntry(scope);
+        if (cachedEntry is not null)
+        {
+            // 返回持久化清单后由前端发起第二个 waitForUpdate 请求。这样缓存可以
+            // 立即显示，同时更新请求仍然经过统一的远程操作闸门和忙碌状态管理。
+            return ToResponse(
+                _latencies.Apply(cachedEntry.Snapshot),
+                "cache",
+                cachedEntry.SavedAtUtc,
+                true,
+                null);
+        }
+
+        var freshSnapshot = await EnsureRefresh(settings, scope).WaitAsync(cancellationToken);
+        var savedEntry = GetCachedEntry(scope);
+        return ToResponse(
+            _latencies.Apply(freshSnapshot),
+            "remote",
+            savedEntry?.SavedAtUtc,
+            false,
+            null);
     }
 
     public async Task<object> SetOrderAsync(JsonElement payload, CancellationToken cancellationToken = default)
@@ -55,8 +108,8 @@ public sealed class ModelService : IDisposable
         try
         {
             var snapshot = await _remote.SetOrderAsync(_settings(), primary, fallbacks, cancellationToken);
-            CacheSnapshot(snapshot);
-            return ToResponse(_latencies.Apply(snapshot));
+            var cached = CacheSnapshot(CreateScopeKey(_settings()), snapshot);
+            return ToResponse(_latencies.Apply(snapshot), "remote", cached.SavedAtUtc, false, null);
         }
         finally { _setBusy(false); _gate.Release(); }
     }
@@ -70,13 +123,17 @@ public sealed class ModelService : IDisposable
             var results = await _remote.TestLatencyAsync(_settings(), models, cancellationToken);
             _latencies.Merge(results);
             var snapshot = _latencies.Apply(await _remote.GetSnapshotAsync(_settings(), cancellationToken));
-            CacheSnapshot(snapshot);
+            var cached = CacheSnapshot(CreateScopeKey(_settings()), snapshot);
             return new
             {
                 snapshot.Primary,
                 snapshot.Fallbacks,
                 snapshot.Available,
                 snapshot.RetrievedAtUtc,
+                cacheSource = "remote",
+                cacheSavedAtUtc = cached.SavedAtUtc,
+                refreshPending = false,
+                refreshError = (string?)null,
                 results
             };
         }
@@ -90,8 +147,8 @@ public sealed class ModelService : IDisposable
         try
         {
             var snapshot = await _remote.AddModelAsync(_settings(), request, cancellationToken);
-            CacheSnapshot(snapshot);
-            return ToResponse(_latencies.Apply(snapshot));
+            var cached = CacheSnapshot(CreateScopeKey(_settings()), snapshot);
+            return ToResponse(_latencies.Apply(snapshot), "remote", cached.SavedAtUtc, false, null);
         }
         finally { _setBusy(false); _gate.Release(); }
     }
@@ -117,42 +174,138 @@ public sealed class ModelService : IDisposable
         }
     }
 
-    private RemoteModelSnapshot? GetCachedSnapshot()
+    private void EnsureConnected()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_isConnected()) throw new InvalidOperationException("请先连接服务器，再管理模型。");
+    }
+
+    private ModelSnapshotCacheEntry? GetCachedEntry(string scope)
     {
         lock (_cacheGate)
         {
-            if (_cachedSnapshot is null || DateTimeOffset.UtcNow - _cachedAtUtc >= SnapshotCacheLifetime)
-                return null;
-            return _cachedSnapshot;
+            if (_cachedSnapshot is not null && string.Equals(_cachedScope, scope, StringComparison.Ordinal))
+                return new ModelSnapshotCacheEntry(_cachedSnapshot, _cachedSavedAtUtc);
+
+            var persisted = _snapshotStore.Get(scope);
+            if (persisted is null) return null;
+            _cachedSnapshot = persisted.Snapshot;
+            _cachedSavedAtUtc = persisted.SavedAtUtc;
+            _cachedScope = scope;
+            return persisted;
         }
     }
 
-    private void CacheSnapshot(RemoteModelSnapshot snapshot)
+    private ModelSnapshotCacheEntry CacheSnapshot(string scope, RemoteModelSnapshot snapshot)
     {
+        var cached = _snapshotStore.Save(scope, snapshot);
         lock (_cacheGate)
         {
             _cachedSnapshot = snapshot;
-            _cachedAtUtc = DateTimeOffset.UtcNow;
+            _cachedSavedAtUtc = cached.SavedAtUtc;
+            _cachedScope = scope;
         }
+        return cached;
     }
 
-    /// <summary>连接切换或服务器配置发生变化时清除本地模型清单缓存。</summary>
-    public void ResetCache()
+    private Task<RemoteModelSnapshot> EnsureRefresh(ConnectionSettings settings, string scope)
     {
         lock (_cacheGate)
         {
-            _cachedSnapshot = null;
-            _cachedAtUtc = default;
+            if (_refreshTask is not null && string.Equals(_refreshScope, scope, StringComparison.Ordinal))
+                return _refreshTask;
+
+            try { _refreshCancellation.Cancel(); } catch (ObjectDisposedException) { }
+            try { _refreshCancellation.Dispose(); } catch (ObjectDisposedException) { }
+            _refreshCancellation = new CancellationTokenSource();
+            _refreshScope = scope;
+            var generation = ++_refreshGeneration;
+            var task = RefreshAsync(settings, scope, generation, _refreshCancellation.Token);
+            _refreshTask = task;
+            _ = ObserveRefreshFaultAsync(task);
+            return task;
         }
     }
 
-    private static object ToResponse(RemoteModelSnapshot snapshot) => new
+    private async Task<RemoteModelSnapshot> RefreshAsync(
+        ConnectionSettings settings,
+        string scope,
+        long generation,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureConnected();
+            _setBusy(true);
+            try
+            {
+                var snapshot = await _remote.GetSnapshotAsync(settings, cancellationToken);
+                lock (_cacheGate)
+                {
+                    if (generation != _refreshGeneration || !string.Equals(_refreshScope, scope, StringComparison.Ordinal))
+                        throw new OperationCanceledException(cancellationToken);
+                }
+                CacheSnapshot(scope, snapshot);
+                return snapshot;
+            }
+            finally { _setBusy(false); }
+        }
+        finally { _gate.Release(); }
+    }
+
+    private static async Task ObserveRefreshFaultAsync(Task<RemoteModelSnapshot> task)
+    {
+        try { await task; } catch { }
+    }
+
+    /// <summary>连接切换或服务器配置发生变化时清除内存状态，但保留持久化清单。</summary>
+    public void ResetCache()
+    {
+        CancellationTokenSource cancellation;
+        lock (_cacheGate)
+        {
+            _cachedSnapshot = null;
+            _cachedSavedAtUtc = default;
+            _cachedScope = null;
+            _refreshTask = null;
+            _refreshScope = null;
+            _refreshGeneration++;
+            cancellation = _refreshCancellation;
+            _refreshCancellation = new CancellationTokenSource();
+        }
+        try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+        try { cancellation.Dispose(); } catch (ObjectDisposedException) { }
+    }
+
+    private static object ToResponse(
+        RemoteModelSnapshot snapshot,
+        string cacheSource,
+        DateTimeOffset? cacheSavedAtUtc,
+        bool refreshPending,
+        string? refreshError) => new
     {
         snapshot.Primary,
         snapshot.Fallbacks,
         snapshot.Available,
-        snapshot.RetrievedAtUtc
+        snapshot.RetrievedAtUtc,
+        cacheSource,
+        cacheSavedAtUtc,
+        refreshPending,
+        refreshError
     };
+
+    private static string CreateScopeKey(ConnectionSettings settings)
+    {
+        var value = string.Join("\n", new[]
+        {
+            settings.Target.Trim().ToLowerInvariant(),
+            settings.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            settings.WorkspacePath.Trim(),
+            settings.StickersPath.Trim()
+        });
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+    }
 
     private static (string Primary, IReadOnlyList<string> Fallbacks) ParseOrder(JsonElement payload)
     {
@@ -229,6 +382,10 @@ public sealed class ModelService : IDisposable
         if (_disposed) return;
         _disposed = true;
         ResetCache();
+        lock (_cacheGate)
+        {
+            _refreshCancellation.Dispose();
+        }
         // SemaphoreSlim has no unmanaged state. Keep it alive so an operation
         // cancelled during window shutdown can still release the gate safely.
     }
