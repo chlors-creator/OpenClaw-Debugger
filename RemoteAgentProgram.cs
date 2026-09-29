@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 
 P = {}
 ROOTS = {}
+MODEL_CACHE = None
 ROOT_DOCS = {"MEMORY.md", "USER.md", "AGENTS.md", "SOUL.md", "DREAMS.md"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_TEXT = 4 * 1024 * 1024
@@ -413,6 +414,9 @@ def valid_model_ref(value):
 def model_provider(value):
     return value.split("/", 1)[0] if "/" in value else ""
 
+def model_key(value):
+    return value.strip().casefold() if isinstance(value, str) else ""
+
 def model_row(value, selected=False):
     ref = model_ref(value)
     if not valid_model_ref(ref):
@@ -464,6 +468,7 @@ def configured_fallbacks(status):
     return []
 
 def models_inventory_core():
+    global MODEL_CACHE
     status = openclaw_json(["models", "status", "--json"])
     catalog = openclaw_json(["models", "list", "--all", "--json"])
     primary_ref = nested_model_value(status)
@@ -474,25 +479,66 @@ def models_inventory_core():
     by_id = {}
     for value in catalog_values if isinstance(catalog_values, list) else []:
         row = model_row(value)
-        if row and row["id"] not in by_id:
-            by_id[row["id"]] = row
-            available.append(row)
+        if row:
+            key = model_key(row["id"])
+            if key and key not in by_id:
+                by_id[key] = row
+                available.append(row)
     for ref in [primary_ref] + fallback_refs:
-        if ref and ref not in by_id:
+        key = model_key(ref)
+        if ref and key not in by_id:
             row = model_row(ref)
             if row:
-                by_id[ref] = row
+                by_id[key] = row
                 available.append(row)
-    primary = by_id.get(primary_ref) if primary_ref else None
-    fallbacks = [by_id[ref] for ref in fallback_refs if ref in by_id and ref != primary_ref]
-    selected = {row["id"] for row in fallbacks}
-    if primary: selected.add(primary["id"])
-    available = [row for row in available if row["id"] not in selected]
-    return {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    primary = by_id.get(model_key(primary_ref)) if primary_ref else None
+    primary_key = model_key(primary_ref)
+    fallbacks = [by_id[model_key(ref)] for ref in fallback_refs if model_key(ref) in by_id and model_key(ref) != primary_key]
+    selected = {model_key(row["id"]) for row in fallbacks}
+    if primary: selected.add(model_key(primary["id"]))
+    available = [row for row in available if model_key(row["id"]) not in selected]
+    snapshot = {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    MODEL_CACHE = snapshot
+    return snapshot
 
 def models_inventory():
     print(json.dumps(models_inventory_core(), ensure_ascii=False, separators=(",", ":")))
 
+def snapshot_with_order(base, primary_ref, fallback_refs):
+    rows = []
+    for row in [base.get("primary")] + list(base.get("fallbacks") or []) + list(base.get("available") or []):
+        if isinstance(row, dict):
+            rows.append(row)
+    by_id = {}
+    for row in rows:
+        key = model_key(row.get("id", ""))
+        if key and key not in by_id:
+            by_id[key] = row
+    primary = by_id.get(model_key(primary_ref)) or model_row(primary_ref)
+    if primary:
+        by_id.setdefault(model_key(primary.get("id", "")), primary)
+    fallbacks = []
+    fallback_keys = set()
+    for ref in fallback_refs:
+        key = model_key(ref)
+        if not key or key == model_key(primary_ref) or key in fallback_keys:
+            continue
+        row = by_id.get(key) or model_row(ref)
+        if row:
+            by_id.setdefault(key, row)
+            fallbacks.append(row)
+            fallback_keys.add(key)
+    selected = {model_key(row.get("id", "")) for row in fallbacks}
+    if primary:
+        selected.add(model_key(primary.get("id", "")))
+    available = []
+    available_keys = set()
+    for row in rows:
+        key = model_key(row.get("id", ""))
+        if key and key not in selected and key not in available_keys:
+            available.append(row)
+            available_keys.add(key)
+    return {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 def apply_model_order(primary, fallbacks):
     subprocess.run(["openclaw", "models", "set", primary], check=True, capture_output=True, text=True, timeout=90)
     subprocess.run(["openclaw", "models", "fallbacks", "clear"], check=True, capture_output=True, text=True, timeout=90)
@@ -500,6 +546,7 @@ def apply_model_order(primary, fallbacks):
         subprocess.run(["openclaw", "models", "fallbacks", "add", ref], check=True, capture_output=True, text=True, timeout=90)
 
 def models_set_order():
+    global MODEL_CACHE
     primary = P.get("primary", "")
     fallbacks = P.get("fallbacks", [])
     if not valid_model_ref(primary) or not isinstance(fallbacks, list) or len(fallbacks) > 20:
@@ -507,17 +554,26 @@ def models_set_order():
     fallbacks = [item.strip() if isinstance(item, str) else "" for item in fallbacks]
     if any(not valid_model_ref(item) for item in fallbacks) or len(set(fallbacks)) != len(fallbacks) or primary in fallbacks:
         fail("模型顺序包含无效或重复项目", "bad_model_order")
-    before = models_inventory_core()
+    before = MODEL_CACHE or models_inventory_core()
     old_primary = before.get("primary", {}).get("id") if before.get("primary") else ""
     old_fallbacks = [item.get("id") for item in before.get("fallbacks", [])]
     try:
-        apply_model_order(primary, fallbacks)
+        append_only = (
+            model_key(primary) == model_key(old_primary)
+            and len(fallbacks) == len(old_fallbacks) + 1
+            and all(model_key(left) == model_key(right) for left, right in zip(fallbacks[:-1], old_fallbacks))
+        )
+        if append_only:
+            subprocess.run(["openclaw", "models", "fallbacks", "add", fallbacks[-1]], check=True, capture_output=True, text=True, timeout=30)
+        else:
+            apply_model_order(primary, fallbacks)
     except Exception as error:
         if valid_model_ref(old_primary):
             try: apply_model_order(old_primary, [item for item in old_fallbacks if item != old_primary])
             except Exception: pass
         fail("模型顺序保存失败，已尝试恢复旧顺序：" + redact_cli_error(error), "model_order_failed")
-    models_inventory()
+    MODEL_CACHE = snapshot_with_order(before, primary, fallbacks)
+    print(json.dumps(MODEL_CACHE, ensure_ascii=False, separators=(",", ":")))
 
 def models_add():
     ref = P.get("modelRef", "").strip() if isinstance(P.get("modelRef"), str) else ""

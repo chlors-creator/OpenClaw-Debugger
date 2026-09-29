@@ -166,7 +166,11 @@
     function renderAvailable(snapshot) {
       const list = $('#modelAvailableList');
       list.replaceChildren();
-      const models = snapshot && snapshot.available || [];
+      const selected = new Set(selectedModels(snapshot).map(model => String(model.id || '').toLowerCase()));
+      const models = (snapshot && snapshot.available || []).filter(model => {
+        const id = String(model && model.id || '').toLowerCase();
+        return id && !selected.has(id);
+      });
       if (!models.length) {
         list.className = 'model-available-list empty-state';
         list.textContent = '没有其它已发现模型。';
@@ -185,7 +189,6 @@
         list.appendChild(row);
       });
     }
-
     function render() {
       const snapshot = state.snapshot;
       renderCurrent(snapshot);
@@ -204,7 +207,7 @@
       document.body.classList.toggle('model-operation-active', state.testing || state.saving || state.adding);
       if (state.loading) $('#modelLatencyStatus').textContent = '正在读取服务器模型配置…';
       else if (state.testing) $('#modelLatencyStatus').textContent = '正在逐个探测模型，可能产生少量 API 请求…';
-      else if (state.saving) $('#modelLatencyStatus').textContent = '正在把拖拽后的顺序写入服务器…';
+      else if (state.saving) $('#modelLatencyStatus').textContent = state.pendingOrder ? '正在保存当前顺序，下一次加入已排队…' : '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
       else if (!state.snapshot) $('#modelLatencyStatus').textContent = connected ? '点击“测试延迟”或加载模型配置。' : '连接服务器后读取模型配置。';
     }
@@ -241,13 +244,38 @@
       return operation;
     }
 
+    function resolveOrder(snapshot, ids) {
+      if (!snapshot || !Array.isArray(ids) || !ids.length) return null;
+      const byId = new Map(allModels(snapshot).map(model => [String(model.id).toLowerCase(), model]));
+      const ordered = ids.map(id => byId.get(String(id).toLowerCase())).filter(Boolean);
+      return ordered.length === ids.length ? ordered : null;
+    }
+
+    function applyLocalOrder(snapshot, ids, ordered) {
+      const selected = new Set(ids.map(id => String(id).toLowerCase()));
+      state.snapshot = {
+        ...snapshot,
+        primary: ordered[0],
+        fallbacks: ordered.slice(1),
+        available: (snapshot.available || []).filter(model => !selected.has(String(model && model.id || '').toLowerCase()))
+      };
+    }
+
     async function persistOrder(ids) {
-      if (!isConnected() || state.saving || ids.length < 1) return;
+      if (!isConnected() || !Array.isArray(ids) || ids.length < 1) return;
       const previous = state.snapshot;
-      const byId = new Map(allModels(previous).map(model => [model.id, model]));
-      const ordered = ids.map(id => byId.get(id)).filter(Boolean);
-      if (ordered.length !== ids.length) { await load(); return; }
-      state.snapshot = { ...previous, primary: ordered[0], fallbacks: ordered.slice(1) };
+      const ordered = resolveOrder(previous, ids);
+      if (!ordered) { await load(); return; }
+      applyLocalOrder(previous, ids, ordered);
+      if (state.saving) {
+        state.pendingOrder = ids.slice();
+        setStatus('已加入备选，已排队等待当前顺序保存完成。');
+        render();
+        syncButtons();
+        return;
+      }
+      state.pendingOrder = null;
+      setStatus('已加入备选，正在写入服务器…');
       render();
       state.saving = true;
       state.orderController?.abort();
@@ -270,10 +298,16 @@
         showToast('模型顺序保存失败，已恢复原顺序。', true);
       } finally {
         if (state.orderController === controller) state.orderController = null;
-        if (generation === state.orderGeneration) { state.saving = false; syncButtons(); render(); }
+        if (generation === state.orderGeneration) {
+          const pending = state.pendingOrder;
+          state.pendingOrder = null;
+          state.saving = false;
+          syncButtons();
+          render();
+          if (pending && isConnected()) void persistOrder(pending);
+        }
       }
     }
-
     async function testLatency() {
       if (!isConnected() || state.testing) return;
       const models = allModelIds(state.snapshot);
