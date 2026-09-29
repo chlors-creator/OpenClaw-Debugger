@@ -20,6 +20,7 @@
           if (message.command === 'busy' && typeof hooks.onBusy === 'function') hooks.onBusy(Boolean(message.data && message.data.busy));
           if (message.command === 'backup' && typeof hooks.onBackup === 'function') hooks.onBackup(message.data || {});
           if (message.command === 'task' && typeof hooks.onTask === 'function') hooks.onTask(message.data || {});
+          if (message.command === 'upload' && typeof hooks.onUpload === 'function') hooks.onUpload(message.data || {});
           return;
         }
         if (!message.id || !pending.has(String(message.id))) return;

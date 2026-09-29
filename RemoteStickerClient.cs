@@ -18,6 +18,9 @@ public sealed class RemoteStickerClient : IRemoteStickerClient
     public Task<RemoteStickerUploadResult> UploadStickerAsync(ConnectionSettings settings, string fileName, Stream source, long size, CancellationToken cancellationToken = default) =>
         _transport.UploadStickerAsync(settings, fileName, source, size, cancellationToken);
 
+    public Task<RemoteStickerUploadResult> UploadStickerAsync(ConnectionSettings settings, string fileName, Stream source, long size, IProgress<long>? progress, CancellationToken cancellationToken = default) =>
+        _transport.UploadStickerAsync(settings, fileName, source, size, progress, cancellationToken);
+
     public Task<RemoteStickerRenameResult> RenameStickerAsync(ConnectionSettings settings, string oldFileName, string newFileName, string expectedSha256, CancellationToken cancellationToken = default) =>
         _transport.RenameStickerAsync(settings, oldFileName, newFileName, expectedSha256, cancellationToken);
 }

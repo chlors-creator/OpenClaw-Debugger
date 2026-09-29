@@ -446,6 +446,7 @@
         else if (task.state === 'running') setStatus('正在执行远程操作：' + (task.command || '任务') + '…');
         else if (task.state === 'failed' && task.message) setStatus(task.message, true);
       },
+      onUpload: progress => appState.uploadController?.handleProgress(progress),
       onBackup: progress => {
         if (progress.phase === 'paused') appState.backupPaused = true;
         renderBackupProgress(progress);

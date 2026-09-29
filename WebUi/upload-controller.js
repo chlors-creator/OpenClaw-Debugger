@@ -96,6 +96,17 @@
       state.uploadChunkCount = chunkCount;
     }
 
+    function handleProgress(progress) {
+      if (!state.inProgress || !progress) return;
+      const current = Number(progress.bytes) || 0;
+      const totalCurrent = Number(progress.totalBytes) || 0;
+      const overall = Math.min(Number(state.totalBytes) || totalCurrent, (Number(state.transferredBeforeFile) || 0) + current);
+      const elapsed = Math.max(0.001, (Date.now() - (state.startedAt || Date.now())) / 1000);
+      const speed = overall / elapsed;
+      const remaining = speed > 0 ? Math.max(0, ((Number(state.totalBytes) || totalCurrent) - overall) / speed) : NaN;
+      $('#uploadProgress').textContent = (state.currentFileName || '文件') + ' · 流式传输 · ' + Math.floor(current / Math.max(1, totalCurrent) * 100) + '% · ' + sizeLabel(speed) + '/s · 剩余 ' + etaText(remaining);
+    }
+
     async function cancelUpload() {
       if (!state.inProgress || state.cancelRequested) return;
       state.cancelRequested = true;
@@ -122,6 +133,7 @@
       state.inProgress = true;
       state.cancelRequested = false;
       state.uploadId = null;
+      state.currentFileName = '';
       state.startedAt = Date.now();
       state.transferredBeforeFile = 0;
       state.totalBytes = files.reduce((sum, file) => sum + file.size, 0);
@@ -153,6 +165,7 @@
         };
         for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
           const file = files[fileIndex];
+          state.currentFileName = file.name;
           if (controller.signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
           // WebView2 can pass the DOM File as a native file object. The host then
           // opens it with a fixed-size stream, avoiding Base64 and a whole-file
@@ -204,7 +217,7 @@
       }
     }
 
-    return { encodeBase64, sha256Hex, hasDraggedFiles, getDroppedFiles, uploadFiles, cancelUpload };
+    return { encodeBase64, sha256Hex, hasDraggedFiles, getDroppedFiles, uploadFiles, cancelUpload, handleProgress };
   }
   window.OpenClawUploadController = { create };
 })();

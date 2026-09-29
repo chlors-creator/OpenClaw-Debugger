@@ -32,6 +32,7 @@ public sealed class StickerService : IDisposable
     private readonly Func<bool> _isBusy;
     private readonly Action<bool> _setConnected;
     private readonly Action<bool> _setBusy;
+    private readonly Action<long, long>? _sendUploadProgress;
 
     private IReadOnlyList<RemoteFile> _files = [];
     private RemoteFile? _catalogFile;
@@ -51,7 +52,8 @@ public sealed class StickerService : IDisposable
         Func<bool> isConnected,
         Func<bool> isBusy,
         Action<bool> setConnected,
-        Action<bool> setBusy)
+        Action<bool> setBusy,
+        Action<long, long>? sendUploadProgress = null)
     {
         _filesRemote = filesRemote;
         _stickersRemote = stickersRemote;
@@ -64,6 +66,7 @@ public sealed class StickerService : IDisposable
         _isBusy = isBusy;
         _setConnected = setConnected;
         _setBusy = setBusy;
+        _sendUploadProgress = sendUploadProgress;
     }
 
     public IReadOnlyList<RemoteFile> Files => _files;
@@ -493,7 +496,8 @@ public sealed class StickerService : IDisposable
         try
         {
             source.Position = 0;
-            uploaded = await _stickersRemote.UploadStickerAsync(_connection(), fileName, source, size, cancellationToken);
+            var progress = _sendUploadProgress is null ? null : new Progress<long>(bytes => _sendUploadProgress(bytes, size));
+            uploaded = await _stickersRemote.UploadStickerAsync(_connection(), fileName, source, size, progress, cancellationToken);
         }
         catch { RestoreCatalog(); throw; }
 

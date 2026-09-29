@@ -17,6 +17,7 @@ public interface IRemoteStickerClient
     Task<RemoteStickerPairWriteResult> WriteStickerPairAsync(ConnectionSettings settings, string catalogText, string expectedCatalogSha256, string manifestText, string expectedManifestSha256, CancellationToken cancellationToken = default);
     Task<RemoteStickerUploadResult> UploadStickerAsync(ConnectionSettings settings, string fileName, byte[] bytes, CancellationToken cancellationToken = default);
     Task<RemoteStickerUploadResult> UploadStickerAsync(ConnectionSettings settings, string fileName, Stream source, long size, CancellationToken cancellationToken = default);
+    Task<RemoteStickerUploadResult> UploadStickerAsync(ConnectionSettings settings, string fileName, Stream source, long size, IProgress<long>? progress, CancellationToken cancellationToken = default);
     Task<RemoteStickerRenameResult> RenameStickerAsync(ConnectionSettings settings, string oldFileName, string newFileName, string expectedSha256, CancellationToken cancellationToken = default);
 }
 

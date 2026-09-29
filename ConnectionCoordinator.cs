@@ -61,7 +61,8 @@ public sealed class ConnectionCoordinator : IDisposable
             () => IsConnected,
             _isBusy,
             value => IsConnected = value,
-            _setBusy);
+            _setBusy,
+            (bytes, total) => _sendProgress("upload", new { phase = "transferring", bytes, totalBytes = total }));
         Models = new ModelService(
             new RemoteModelClient(_remote),
             () => settings.Connection,

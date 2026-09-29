@@ -168,7 +168,16 @@ public sealed partial class RemoteOpenClawClient : IDisposable
         Stream source,
         long size,
         CancellationToken cancellationToken = default) =>
-        _streamUploader.UploadAsync(settings, fileName, source, size, cancellationToken);
+        _streamUploader.UploadAsync(settings, fileName, source, size, null, cancellationToken);
+
+    public Task<RemoteStickerUploadResult> UploadStickerAsync(
+        ConnectionSettings settings,
+        string fileName,
+        Stream source,
+        long size,
+        IProgress<long>? progress,
+        CancellationToken cancellationToken = default) =>
+        _streamUploader.UploadAsync(settings, fileName, source, size, progress, cancellationToken);
 
     public async Task<RemoteStickerRenameResult> RenameStickerAsync(
         ConnectionSettings settings, string oldFileName, string newFileName, string expectedSha256,

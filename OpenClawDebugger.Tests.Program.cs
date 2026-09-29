@@ -100,7 +100,7 @@ sealed class TestSuite
         Assert(!StickerManifestSynchronizer.TryUpdate(original, rows, out var updated, out _), "不匹配的标签文件应拒绝写入");
         Assert(updated == original, "拒绝写入时原文应保持不变");
         var sourceRoot = FindSourceRoot();
-        var remoteProgram = File.ReadAllText(Path.Combine(sourceRoot, "RemoteAgentProgram.cs"));
+        var remoteProgram = File.ReadAllText(Path.Combine(sourceRoot, "RemoteAgentProgram.py"));
         Assert(remoteProgram.Contains("os.replace(restore_path, manifest_path)", StringComparison.Ordinal), "远程事务应包含 manifest 回滚路径");
         return Task.CompletedTask;
     }
@@ -180,7 +180,7 @@ sealed class TestSuite
     private static Task UploadSecurityAsync()
     {
         var png = new byte[24];
-        png[0..8].AsSpan().CopyTo(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.AsSpan().CopyTo(png.AsSpan(0, 8));
         png[16] = 0; png[19] = 1; png[20] = 0; png[23] = 1;
         using var stream = new MemoryStream(png);
         StickerUploadService.ValidateImage(stream, "safe.png");
@@ -215,7 +215,7 @@ sealed class TestSuite
         Assert(html.IndexOf("data-tab=\"models\"", StringComparison.Ordinal) < html.IndexOf("data-tab=\"stickers\"", StringComparison.Ordinal), "模型导航应位于表情包之前");
         Assert(controller.Contains("bridgeCall('setModelOrder'", StringComparison.Ordinal), "拖拽后应直接调用自动保存命令");
         Assert(!html.Contains("saveModelOrderButton", StringComparison.Ordinal), "模型页不应有保存顺序按钮");
-        Assert(File.ReadAllText(Path.Combine(sourceRoot, "RemoteAgentProgram.cs")).Contains("models_set_order", StringComparison.Ordinal), "服务器代理应实现模型顺序写入");
+        Assert(File.ReadAllText(Path.Combine(sourceRoot, "RemoteAgentProgram.py")).Contains("models_set_order", StringComparison.Ordinal), "服务器代理应实现模型顺序写入");
         return Task.CompletedTask;
     }
 

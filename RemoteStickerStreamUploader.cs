@@ -74,6 +74,7 @@ except Exception as error:
         string fileName,
         Stream source,
         long size,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         SshCommandRunner.ValidateSettings(settings);
@@ -115,7 +116,16 @@ except Exception as error:
             await process.StandardInput.BaseStream.WriteAsync(headerBytes, timeout.Token);
             await process.StandardInput.BaseStream.FlushAsync(timeout.Token);
             if (source.CanSeek) source.Position = 0;
-            await source.CopyToAsync(process.StandardInput.BaseStream, 256 * 1024, timeout.Token);
+            var buffer = new byte[256 * 1024];
+            long sent = 0;
+            while (sent < size)
+            {
+                var read = await source.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, size - sent)), timeout.Token);
+                if (read == 0) throw new EndOfStreamException("本地上传流在文件完成前结束。");
+                await process.StandardInput.BaseStream.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+                sent += read;
+                progress?.Report(sent);
+            }
             await process.StandardInput.BaseStream.FlushAsync(timeout.Token);
             process.StandardInput.Close();
             var outputLine = await process.StandardOutput.ReadLineAsync(timeout.Token);
