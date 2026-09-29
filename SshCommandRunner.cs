@@ -145,6 +145,9 @@ internal static class SshCommandRunner
             return new InvalidOperationException("完整服务器快照需要 admin 对 tar 命令具备 root 权限。");
         if (detail.Contains("REMOTE HOST IDENTIFICATION HAS CHANGED", StringComparison.OrdinalIgnoreCase))
             return new InvalidOperationException("服务器 SSH 主机指纹发生变化，快照已取消。");
+        if (detail.Contains("banner exchange", StringComparison.OrdinalIgnoreCase))
+            return new SnapshotTransferInterruptedException(
+                "SSH 服务器在握手阶段没有返回协议横幅。请检查服务器 sshd 是否忙碌或未响应、云安全组和防火墙规则；原始错误：" + detail);
         if (exitCode == 255 || IsTransientSshFailure(detail))
             return new SnapshotTransferInterruptedException(string.IsNullOrWhiteSpace(detail)
                 ? "SSH 网络连接中断。"
