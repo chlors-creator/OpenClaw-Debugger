@@ -53,7 +53,11 @@ internal static class SshCommandRunner
     {
         // Keep the SSH command short. The first stdin line carries the base64 script;
         // the script then continues reading the JSON/binary protocol from the same stream.
-        start.ArgumentList.Add("python3 -u -c \"import sys,base64;exec(base64.b64decode(sys.stdin.readline()))\"");
+        // Read the bootstrap line from the same binary buffer used by the
+        // long-lived agent protocol. TextIOWrapper.readline() may prefetch the
+        // first JSON request into a different buffer, leaving the agent loop
+        // blocked while waiting for bytes that have already been consumed.
+        start.ArgumentList.Add("python3 -u -c \"import sys,base64;exec(base64.b64decode(sys.stdin.buffer.readline()))\"");
     }
 
     internal static void WritePythonBootstrap(Stream input, string program)
