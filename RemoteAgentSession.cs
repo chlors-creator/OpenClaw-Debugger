@@ -25,7 +25,7 @@ internal sealed class RemoteAgentSession : IDisposable
         await _sessionGate.WaitAsync(cancellationToken);
         try
         {
-            var process = EnsureSession(settings);
+            var process = await EnsureSessionAsync(settings, cancellationToken);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(operationTimeout ?? TimeSpan.FromMinutes(3));
             await process.StandardInput.WriteAsync(payload.AsMemory(), timeout.Token);
@@ -59,6 +59,20 @@ internal sealed class RemoteAgentSession : IDisposable
         finally
         {
             _sessionGate.Release();
+        }
+    }
+
+    private async Task<Process> EnsureSessionAsync(ConnectionSettings settings, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return EnsureSession(settings);
+        }
+        catch (SnapshotTransferInterruptedException) when (!cancellationToken.IsCancellationRequested)
+        {
+            OperationLogStore.Current?.Stage("ssh-retry", "SSH 握手未完成，1 秒后重试", 1);
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            return EnsureSession(settings);
         }
     }
 
