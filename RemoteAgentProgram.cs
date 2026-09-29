@@ -6,6 +6,7 @@ internal static class RemoteAgentProgram
     public const string Main = """
 import base64, hashlib, json, os, re, stat, subprocess, sys, tempfile, time
 from pathlib import PurePosixPath
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 P = {}
 ROOTS = {}
@@ -603,25 +604,48 @@ def models_test_latency():
     models = [item.strip() if isinstance(item, str) else "" for item in models]
     if any(not valid_model_ref(item) for item in models): fail("测试模型引用无效", "bad_model_test")
     tested = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    results = []
-    for ref in models:
+
+    def probe(ref):
         started = time.perf_counter()
         try:
             completed = subprocess.run(
                 ["openclaw", "infer", "model", "run", "--local", "--model", ref, "--prompt", "Reply with exactly: openclaw-debugger-latency", "--json"],
                 capture_output=True, text=True, timeout=15, env=os.environ.copy())
             if completed.returncode == 0:
-                results.append({"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "testedAtUtc": tested})
-            else:
-                results.append({"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "testedAtUtc": tested})
+                return {"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "testedAtUtc": tested}
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "testedAtUtc": tested}
         except subprocess.TimeoutExpired:
-            results.append({"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "testedAtUtc": tested})
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "testedAtUtc": tested}
         except FileNotFoundError:
-            fail("服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "openclaw_missing")
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": "服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "fatalCode": "openclaw_missing", "testedAtUtc": tested}
         except Exception as error:
-            results.append({"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "testedAtUtc": tested})
-    print(json.dumps({"ok": True, "testedAtUtc": tested, "results": results}, ensure_ascii=False, separators=(",", ":")))
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "testedAtUtc": tested}
 
+    # 保持最多 10 个探测同时运行；任意一个完成后立即从待测队列补充下一个。
+    max_workers = min(10, len(models))
+    pending = iter(models)
+    active = {}
+    results_by_id = {}
+    fatal_code = None
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for _ in range(max_workers):
+            ref = next(pending, None)
+            if ref is None: break
+            active[executor.submit(probe, ref)] = ref
+        while active:
+            completed, _ = wait(active, return_when=FIRST_COMPLETED)
+            for future in completed:
+                ref = active.pop(future)
+                result = future.result()
+                fatal_code = fatal_code or result.pop("fatalCode", None)
+                results_by_id[ref] = result
+                next_ref = next(pending, None)
+                if next_ref is not None:
+                    active[executor.submit(probe, next_ref)] = next_ref
+    if fatal_code == "openclaw_missing":
+        fail("服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "openclaw_missing")
+    results = [results_by_id[ref] for ref in models]
+    print(json.dumps({"ok": True, "testedAtUtc": tested, "results": results}, ensure_ascii=False, separators=(",", ":")))
 def handle(encoded):
     global P, ROOTS
     try:

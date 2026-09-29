@@ -206,7 +206,7 @@
       $('#addModelButton').disabled = !connected || state.loading || state.testing || state.saving || state.adding;
       document.body.classList.toggle('model-operation-active', state.testing || state.saving || state.adding);
       if (state.loading) $('#modelLatencyStatus').textContent = '正在读取服务器模型配置…';
-      else if (state.testing) $('#modelLatencyStatus').textContent = '正在逐个探测模型，可能产生少量 API 请求…';
+      else if (state.testing) $("#modelLatencyStatus").textContent = "正在并发探测模型（最多 10 个同时进行），完成一个即补充下一个…";
       else if (state.saving) $('#modelLatencyStatus').textContent = state.pendingOrder ? '正在保存当前顺序，下一次加入已排队…' : '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
       else if (!state.snapshot) $('#modelLatencyStatus').textContent = connected ? '点击“测试延迟”或加载模型配置。' : '连接服务器后读取模型配置。';
