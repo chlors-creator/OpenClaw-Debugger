@@ -68,8 +68,10 @@ internal static class SshCommandRunner
     {
         var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(program)) + "\n";
         var bytes = System.Text.Encoding.ASCII.GetBytes(encoded);
-        await input.WriteAsync(bytes, cancellationToken);
-        await input.FlushAsync(cancellationToken);
+        // WaitAsync also covers platforms where anonymous-pipe WriteAsync does not
+        // observe cancellation until the underlying SSH process is closed.
+        await input.WriteAsync(bytes).AsTask().WaitAsync(cancellationToken);
+        await input.FlushAsync().WaitAsync(cancellationToken);
     }
 
     internal static string ReadStartupError(Process process, Task<string>? errorTask)
