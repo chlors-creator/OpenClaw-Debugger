@@ -255,10 +255,11 @@
         };
         $('#modelLatencyStatus').textContent = phaseText[state.loadPhase] || '正在读取服务器模型配置……';
       }
-      else if (state.testing) $("#modelLatencyStatus").textContent = "测试模型延迟ing";
+      else if (state.testing) $('#modelLatencyStatus').textContent = '正在并发探测模型首响应（最多 10 个同时进行）…';
       else if (state.saving) $('#modelLatencyStatus').textContent = state.pendingOrder ? '正在保存当前顺序，下一次加入已排队…' : '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
       else if (!state.snapshot) $('#modelLatencyStatus').textContent = connected ? '点击“测试延迟”或加载模型配置。' : '连接服务器后读取模型配置。';
+      else $('#modelLatencyStatus').textContent = '';
     }
 
     function load() {
