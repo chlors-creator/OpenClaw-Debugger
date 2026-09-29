@@ -72,6 +72,43 @@ internal static class SshCommandRunner
         await input.FlushAsync(cancellationToken);
     }
 
+    internal static string ReadStartupError(Process process, Task<string>? errorTask)
+    {
+        try
+        {
+            if (!process.HasExited) process.WaitForExit(1500);
+        }
+        catch { }
+
+        if (errorTask is null) return "";
+        try
+        {
+            if (!errorTask.IsCompleted) errorTask.Wait(1500);
+            return errorTask.IsCompletedSuccessfully ? errorTask.Result : "";
+        }
+        catch { return ""; }
+    }
+
+    internal static Exception CreateStartupFailure(
+        Process process,
+        string executable,
+        string stderr,
+        Exception cause)
+    {
+        var exitCode = -1;
+        try
+        {
+            if (process.HasExited) exitCode = process.ExitCode;
+        }
+        catch { }
+
+        if (exitCode >= 0 || !string.IsNullOrWhiteSpace(stderr))
+            return CreateSshFailure(stderr, exitCode);
+
+        return new InvalidOperationException(
+            $"无法启动 Windows OpenSSH：{executable}\n{cause.Message}", cause);
+    }
+
     internal static void AddSshArguments(ProcessStartInfo start, ConnectionSettings settings)
     {
         start.ArgumentList.Add("-T");

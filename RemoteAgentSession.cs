@@ -41,6 +41,11 @@ internal sealed class RemoteAgentSession : IDisposable
             if (cancellationToken.IsCancellationRequested) throw;
             throw new TimeoutException("SSH 操作超时。请检查网络、SSH 密钥代理和服务器状态。");
         }
+        catch (SnapshotTransferInterruptedException)
+        {
+            ResetSession();
+            throw;
+        }
         catch (IOException ex)
         {
             ResetSession();
@@ -78,17 +83,21 @@ internal sealed class RemoteAgentSession : IDisposable
         SshCommandRunner.AddSshArguments(start, settings);
         SshCommandRunner.AddPythonBootstrapArgument(start);
         var process = new Process { StartInfo = start };
+        Task<string>? errorTask = null;
         try
         {
             if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
+            errorTask = process.StandardError.ReadToEndAsync();
             SshCommandRunner.WritePythonBootstrap(process.StandardInput.BaseStream, RemoteAgentProgram.Main);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            var stderr = SshCommandRunner.ReadStartupError(process, errorTask);
+            var failure = SshCommandRunner.CreateStartupFailure(process, start.FileName, stderr, ex);
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
             process.Dispose();
-            throw new InvalidOperationException($"无法启动 Windows OpenSSH：{start.FileName}\n{ex.Message}", ex);
+            throw failure;
         }
-        _ = process.StandardError.ReadToEndAsync();
         _sessionProcess = process;
         _sessionKey = key;
         return process;
