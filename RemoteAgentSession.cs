@@ -12,6 +12,7 @@ internal sealed class RemoteAgentSession : IDisposable
 {
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
     private Process? _sessionProcess;
+    private Task<string>? _sessionErrorTask;
     private string? _sessionKey;
 
     public async Task<JsonObject> InvokeAsync(
@@ -21,6 +22,25 @@ internal sealed class RemoteAgentSession : IDisposable
         SshCommandRunner.ValidateSettings(settings);
         request["workspace"] = settings.WorkspacePath;
         request["stickers"] = settings.StickersPath;
+        var retryable = IsSafeToRetry(request);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await InvokeOnceAsync(settings, request, cancellationToken, operationTimeout);
+            }
+            catch (SnapshotTransferInterruptedException) when (retryable && attempt == 0 && !cancellationToken.IsCancellationRequested)
+            {
+                OperationLogStore.Current?.Stage("ssh-retry", "复用 SSH 连接中断，正在重建会话并重试只读操作", 1);
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            }
+        }
+    }
+
+    private async Task<JsonObject> InvokeOnceAsync(
+        ConnectionSettings settings, JsonObject request, CancellationToken cancellationToken,
+        TimeSpan? operationTimeout)
+    {
         var payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(request.ToJsonString()));
         await _sessionGate.WaitAsync(cancellationToken);
         try
@@ -48,8 +68,13 @@ internal sealed class RemoteAgentSession : IDisposable
         }
         catch (IOException ex)
         {
+            var process = _sessionProcess;
+            var diagnostic = await ReadSessionDiagnosticAsync(process);
             ResetSession();
-            throw new SnapshotTransferInterruptedException("SSH 复用连接中断。", ex);
+            var message = string.IsNullOrWhiteSpace(diagnostic)
+                ? "SSH 复用连接中断。"
+                : "SSH 复用连接中断：" + diagnostic;
+            throw new SnapshotTransferInterruptedException(message, ex);
         }
         catch
         {
@@ -113,6 +138,7 @@ internal sealed class RemoteAgentSession : IDisposable
             throw failure;
         }
         _sessionProcess = process;
+        _sessionErrorTask = errorTask;
         _sessionKey = key;
         return process;
     }
@@ -121,10 +147,41 @@ internal sealed class RemoteAgentSession : IDisposable
     {
         var process = _sessionProcess;
         _sessionProcess = null;
+        _sessionErrorTask = null;
         _sessionKey = null;
         if (process is null) return;
         try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
         process.Dispose();
+    }
+
+    private async Task<string> ReadSessionDiagnosticAsync(Process? process)
+    {
+        var parts = new List<string>();
+        var errorTask = _sessionErrorTask;
+        if (errorTask is not null)
+        {
+            try
+            {
+                if (!errorTask.IsCompleted)
+                    await Task.WhenAny(errorTask, Task.Delay(TimeSpan.FromMilliseconds(250)));
+                if (errorTask.IsCompletedSuccessfully && !string.IsNullOrWhiteSpace(errorTask.Result))
+                    parts.Add(errorTask.Result.Trim());
+            }
+            catch { }
+        }
+        try
+        {
+            if (process is not null && process.HasExited)
+                parts.Add("ssh.exe 退出码 " + process.ExitCode.ToString(CultureInfo.InvariantCulture));
+        }
+        catch { }
+        return OperationLogStore.Redact(string.Join("；", parts));
+    }
+
+    private static bool IsSafeToRetry(JsonObject request)
+    {
+        var action = request["action"]?.GetValue<string>();
+        return action is "inventory" or "read" or "models_inventory" or "models_test_latency";
     }
 
     /// <summary>主动关闭复用 SSH 进程，但保留会话对象以便之后重新连接。</summary>
