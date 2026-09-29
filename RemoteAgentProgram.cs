@@ -190,7 +190,8 @@ def gateway_model_list():
     global MODEL_GATEWAY
     if MODEL_GATEWAY is None: MODEL_GATEWAY = ModelGatewayQueryProcess()
     try:
-        return MODEL_GATEWAY.request("models.list", {"view": "all"})
+        # 普通模型选择器只读取已配置/允许的模型，不能使用 view=all。
+        return MODEL_GATEWAY.request("models.list", {"view": "configured"})
     except Exception:
         if MODEL_GATEWAY is not None: MODEL_GATEWAY.close()
         raise
@@ -655,15 +656,16 @@ def models_inventory_core(force=False):
     global MODEL_CACHE, MODEL_CACHE_AT
     if not force and MODEL_CACHE is not None and (time.monotonic() - MODEL_CACHE_AT) < MODEL_CACHE_TTL:
         return MODEL_CACHE
-    # 优先调用服务器常驻 Gateway 的 models.list RPC。Gateway 已经加载了
-    # OpenClaw 运行时和模型目录，避免每次查询重新启动 OpenClaw CLI。
+    # 优先调用服务器常驻 Gateway 的 configured models.list RPC。Gateway 已经加载了
+    # OpenClaw 运行时和模型配置，避免把完整发布目录误显示为可用模型，
+    # 也避免每次查询重新启动 OpenClaw CLI。
     # Gateway 不可用时才回退到 CLI，保证旧版/未启动 Gateway 的服务器仍能使用。
     try:
         catalog = gateway_model_list()
         status = {"config": openclaw_config()}
     except Exception:
         status = openclaw_json(["models", "status", "--json"])
-        catalog = openclaw_json(["models", "list", "--all", "--json"])
+        catalog = openclaw_json(["models", "list", "--json"])
     primary_ref = nested_model_value(status)
     fallback_refs = configured_fallbacks(status)
     catalog_values = catalog.get("models") or catalog.get("items") or catalog.get("data") or []
