@@ -35,7 +35,7 @@ body.theme-light .file-row.selected,body.theme-light .sticker-row.selected{backg
 #connectButton .connection-button-label{display:inline-block;animation:connection-label-in .24s ease-out both}
 #connectButton.connection-button-connected{border-color:color-mix(in srgb,var(--palette-accent) 40%,transparent);background:color-mix(in srgb,var(--palette-accent) 12%,var(--palette-surface));color:var(--palette-accent2);box-shadow:0 5px 18px color-mix(in srgb,var(--palette-accent) 12%,transparent)}
 #connectButton.connection-button-connected:hover:not(:disabled),#connectButton.connection-button-connected:focus-visible:not(:disabled){border-color:color-mix(in srgb,var(--palette-danger) 55%,transparent);background:color-mix(in srgb,var(--palette-danger) 14%,var(--palette-surface));color:var(--palette-danger);box-shadow:0 8px 24px color-mix(in srgb,var(--palette-danger) 18%,transparent)}
-#connectButton.connection-button-pending{cursor:pointer;border-color:color-mix(in srgb,var(--palette-warm) 48%,transparent);color:var(--palette-warm)}
+#connectButton.connection-button-pending{cursor:pointer;border-color:color-mix(in srgb,var(--palette-warm) 48%,transparent);color:var(--palette-ink)}
 @keyframes connection-label-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){#connectButton .connection-button-label{animation:none}}
 
