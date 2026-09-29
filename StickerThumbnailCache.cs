@@ -20,12 +20,17 @@ public sealed class StickerThumbnailCache
 {
     private const int ThumbnailEdge = 256;
     private const long PersistentCacheLimit = 128L * 1024 * 1024;
+    private const long MemoryCacheLimit = 32L * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
     };
 
     private readonly string _privateDirectory;
+    private readonly object _memoryGate = new();
+    private readonly Dictionary<string, MemoryEntry> _memoryCache = new(StringComparer.Ordinal);
+    private readonly LinkedList<string> _memoryLru = new();
+    private readonly Dictionary<string, Task<StickerThumbnailResult>> _inflight = new(StringComparer.Ordinal);
 
     public StickerThumbnailCache(string privateDirectory)
     {
@@ -33,37 +38,116 @@ public sealed class StickerThumbnailCache
         Directory.CreateDirectory(Path.Combine(_privateDirectory, "ThumbnailCache"));
     }
 
-    public async Task<StickerThumbnailResult> ReadAsync(
+    public Task<StickerThumbnailResult> ReadAsync(
         IRemoteFileClient remote,
         ConnectionSettings settings,
         RemoteFile file,
         CancellationToken cancellationToken = default)
     {
         var cachePath = GetCachePath(file);
+        if (TryGetMemory(cachePath, out var memoryHit))
+            return Task.FromResult(memoryHit with { CacheHit = true });
+
+        Task<StickerThumbnailResult> task;
+        lock (_memoryGate)
+        {
+            if (_inflight.TryGetValue(cachePath, out task!))
+                return task.WaitAsync(cancellationToken);
+            task = LoadAsync(remote, settings, file, cachePath, cancellationToken);
+            _inflight[cachePath] = task;
+        }
+
+        return AwaitAndReleaseAsync(cachePath, task, cancellationToken);
+    }
+
+    private async Task<StickerThumbnailResult> LoadAsync(
+        IRemoteFileClient remote,
+        ConnectionSettings settings,
+        RemoteFile file,
+        string cachePath,
+        CancellationToken cancellationToken)
+    {
         var cached = await ReadCacheAsync(cachePath, cancellationToken);
         if (cached is not null)
         {
-            return new StickerThumbnailResult(
+            var result = new StickerThumbnailResult(
                 file.RelativePath,
                 cached.DataUrl,
                 cached.Size,
                 cached.OriginalSize,
                 ThumbnailEdge,
                 true);
+            PutMemory(cachePath, result);
+            return result;
         }
-
         var content = await remote.ReadAsync(settings, file, cancellationToken);
         var original = content.Binary ?? throw new InvalidDataException("服务器返回的图片数据为空。");
         var thumbnail = await Task.Run(() => CreateThumbnail(original, file.RelativePath), cancellationToken);
         var entry = new CachedStickerThumbnail(thumbnail.DataUrl, thumbnail.Size, content.Size, ThumbnailEdge);
         await WriteCacheAsync(cachePath, entry, cancellationToken);
-        return new StickerThumbnailResult(
+        var generated = new StickerThumbnailResult(
             file.RelativePath,
             thumbnail.DataUrl,
             thumbnail.Size,
             content.Size,
             ThumbnailEdge,
             false);
+        PutMemory(cachePath, generated);
+        return generated;
+    }
+
+    private async Task<StickerThumbnailResult> AwaitAndReleaseAsync(
+        string cachePath,
+        Task<StickerThumbnailResult> task,
+        CancellationToken cancellationToken)
+    {
+        try { return await task.WaitAsync(cancellationToken); }
+        finally
+        {
+            lock (_memoryGate)
+            {
+                if (_inflight.TryGetValue(cachePath, out var current) && ReferenceEquals(current, task))
+                    _inflight.Remove(cachePath);
+            }
+        }
+    }
+
+    private bool TryGetMemory(string key, out StickerThumbnailResult result)
+    {
+        lock (_memoryGate)
+        {
+            if (_memoryCache.TryGetValue(key, out var entry))
+            {
+                _memoryLru.Remove(entry.Node);
+                entry.Node = _memoryLru.AddLast(key);
+                result = entry.Result;
+                return true;
+            }
+        }
+        result = default!;
+        return false;
+    }
+
+    private void PutMemory(string key, StickerThumbnailResult result)
+    {
+        var bytes = Encoding.UTF8.GetByteCount(result.DataUrl);
+        lock (_memoryGate)
+        {
+            if (_memoryCache.TryGetValue(key, out var old))
+            {
+                _memoryLru.Remove(old.Node);
+                _memoryCache.Remove(key);
+            }
+            var node = _memoryLru.AddLast(key);
+            _memoryCache[key] = new MemoryEntry(result, bytes, node);
+            var total = _memoryCache.Values.Sum(item => item.Bytes);
+            while (total > MemoryCacheLimit && _memoryLru.First is not null)
+            {
+                var removeKey = _memoryLru.First.Value;
+                _memoryLru.RemoveFirst();
+                if (_memoryCache.Remove(removeKey, out var removed)) total -= removed.Bytes;
+            }
+        }
     }
 
     private string GetCachePath(RemoteFile file)
@@ -216,4 +300,11 @@ public sealed class StickerThumbnailCache
     }
 
     private sealed record CachedStickerThumbnail(string DataUrl, long Size, long OriginalSize, int ThumbnailEdge);
+
+    private sealed class MemoryEntry(StickerThumbnailResult result, long bytes, LinkedListNode<string> node)
+    {
+        public StickerThumbnailResult Result { get; } = result;
+        public long Bytes { get; } = bytes;
+        public LinkedListNode<string> Node { get; set; } = node;
+    }
 }

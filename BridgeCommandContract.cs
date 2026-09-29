@@ -22,7 +22,26 @@ public sealed class BridgeCommandContract
             throw new InvalidDataException("桥接协议文件版本与桌面宿主版本不一致。");
         if (contract.Commands.Count == 0)
             throw new InvalidDataException("桥接协议没有注册任何命令。");
+        ValidateGeneratedShape(contract);
         return contract;
+    }
+
+    private static void ValidateGeneratedShape(BridgeCommandContract contract)
+    {
+        if (!BridgeContractGenerated.Commands.Keys.ToHashSet(StringComparer.Ordinal)
+            .SetEquals(contract.Commands.Keys))
+            throw new InvalidDataException("桥接协议清单与生成类型不一致，请重新生成协议文件。");
+
+        foreach (var (name, generated) in BridgeContractGenerated.Commands)
+        {
+            var actual = contract.Commands[name];
+            if (!string.Equals(generated.Mode, actual.Mode, StringComparison.Ordinal) ||
+                !string.Equals(generated.Domain, actual.Domain, StringComparison.Ordinal) ||
+                generated.TimeoutMs != actual.TimeoutMs ||
+                !generated.Payload.OrderBy(item => item.Key, StringComparer.Ordinal)
+                    .SequenceEqual(actual.Payload.OrderBy(item => item.Key, StringComparer.Ordinal)))
+                throw new InvalidDataException($"桥接命令定义与生成类型不一致：{name}。");
+        }
     }
 
     public BridgeCommandDefinition GetCommand(string name) =>

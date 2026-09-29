@@ -62,10 +62,12 @@ public sealed partial class RemoteOpenClawClient : IDisposable
             ["root"] = file.Root,
             ["path"] = file.RelativePath
         };
-        var response = await _session.InvokeAsync(settings, request, cancellationToken);
+        var binaryResponse = await _session.InvokeBinaryAsync(settings, request, cancellationToken: cancellationToken);
+        var response = binaryResponse.Metadata;
         var isBinary = response["binary"]?.GetValue<bool>() ?? false;
-        var encoded = response["content"]?.GetValue<string>() ?? "";
-        var raw = Convert.FromBase64String(encoded);
+        var raw = binaryResponse.Data;
+        if (raw.Length == 0 && response["content"] is JsonValue encodedValue && encodedValue.TryGetValue<string>(out var encoded))
+            raw = Convert.FromBase64String(encoded);
         var text = isBinary ? null : new UTF8Encoding(false, true).GetString(raw).TrimStart('\uFEFF');
         return new RemoteFileContent(
             file.Root,
@@ -98,10 +100,9 @@ public sealed partial class RemoteOpenClawClient : IDisposable
             ["action"] = "write",
             ["root"] = file.Root,
             ["path"] = file.RelativePath,
-            ["expectedSha256"] = expectedSha256,
-            ["content"] = Convert.ToBase64String(bytes)
+            ["expectedSha256"] = expectedSha256
         };
-        var response = await _session.InvokeAsync(settings, request, cancellationToken);
+        var response = (await _session.InvokeBinaryAsync(settings, request, bytes, cancellationToken)).Metadata;
         return response["sha256"]?.GetValue<string>() ?? "";
     }
     public async Task<RemoteStickerPairWriteResult> WriteStickerPairAsync(
@@ -117,11 +118,16 @@ public sealed partial class RemoteOpenClawClient : IDisposable
             ["action"] = "write_pair",
             ["root"] = "stickers",
             ["catalogExpectedSha256"] = expectedCatalogSha256,
-            ["manifestExpectedSha256"] = expectedManifestSha256,
-            ["catalogContent"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(catalogText)),
-            ["manifestContent"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(manifestText))
+            ["manifestExpectedSha256"] = expectedManifestSha256
         };
-        var response = await _session.InvokeAsync(settings, request, cancellationToken);
+        var catalogBytes = Encoding.UTF8.GetBytes(catalogText);
+        var manifestBytes = Encoding.UTF8.GetBytes(manifestText);
+        request["catalogLength"] = catalogBytes.Length;
+        request["manifestLength"] = manifestBytes.Length;
+        var payload = new byte[catalogBytes.Length + manifestBytes.Length];
+        Buffer.BlockCopy(catalogBytes, 0, payload, 0, catalogBytes.Length);
+        Buffer.BlockCopy(manifestBytes, 0, payload, catalogBytes.Length, manifestBytes.Length);
+        var response = (await _session.InvokeBinaryAsync(settings, request, payload, cancellationToken)).Metadata;
         return new RemoteStickerPairWriteResult(
             response["catalogSha256"]?.GetValue<string>() ?? "",
             response["catalogSize"]?.GetValue<long>() ?? Encoding.UTF8.GetByteCount(catalogText),
@@ -135,10 +141,9 @@ public sealed partial class RemoteOpenClawClient : IDisposable
         {
             ["action"] = "upload",
             ["root"] = "stickers",
-            ["filename"] = fileName,
-            ["content"] = Convert.ToBase64String(bytes)
+            ["filename"] = fileName
         };
-        var response = await _session.InvokeAsync(settings, request, cancellationToken);
+        var response = (await _session.InvokeBinaryAsync(settings, request, bytes, cancellationToken)).Metadata;
         return new RemoteStickerUploadResult(
             response["relativePath"]?.GetValue<string>() ?? fileName,
             response["size"]?.GetValue<long>() ?? bytes.LongLength,

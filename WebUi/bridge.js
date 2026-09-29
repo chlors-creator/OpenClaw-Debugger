@@ -5,7 +5,7 @@
       const pending = new Map();
       let requestId = 0;
       const hooks = options || {};
-      const fallbackContract = {
+      const fallbackContract = window.OpenClawBridgeContract || {
         protocolVersion: 2,
         commands: {}
       };
