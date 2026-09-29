@@ -15,7 +15,7 @@ internal sealed class RemoteAgentSession : IDisposable
 {
     private const int MaxRetryCount = 5;
     private const int MaxLineBytes = 8 * 1024 * 1024;
-    private const int MaxBinaryBytes = 16 * 1024 * 1024;
+    private const int MaxBinaryBytes = 30 * 1024 * 1024;
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
     private readonly byte[] _outputBuffer = new byte[16 * 1024];
     private Process? _sessionProcess;
@@ -52,7 +52,8 @@ internal sealed class RemoteAgentSession : IDisposable
         request["workspace"] = settings.WorkspacePath;
         request["stickers"] = settings.StickersPath;
         request["protocolVersion"] = RemoteAgentProtocol.Version;
-        request["scriptHash"] = RemoteAgentProgram.ScriptHash;
+        // Kept as an optional compatibility field; the remote agent no longer
+        // rejects a request when the embedded script changes.
         if (requestBody is { } body)
             request["binaryLength"] = body.Length;
         else

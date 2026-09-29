@@ -147,6 +147,8 @@ public sealed partial class RemoteOpenClawClient : IDisposable
     public async Task<RemoteStickerUploadResult> UploadStickerAsync(
         ConnectionSettings settings, string fileName, byte[] bytes, CancellationToken cancellationToken = default)
     {
+        using (var validationStream = new MemoryStream(bytes, writable: false))
+            StickerUploadService.ValidateImage(validationStream, fileName);
         var request = new JsonObject
         {
             ["action"] = "upload",

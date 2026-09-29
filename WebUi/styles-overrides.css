@@ -110,3 +110,10 @@ body.theme-light .file-row.selected,body.theme-light .sticker-row.selected{backg
 .virtual-list-content{position:relative;width:100%;min-height:1px}
 .virtual-list-row{width:100%;margin:0 0 6px;contain:layout paint}
 .model-available-list.virtual-list-active,.sticker-list.virtual-list-active{display:block;position:relative;overflow:auto}
+/* Search and filter controls for large model and sticker catalogs. */
+.model-filter-row{display:grid;grid-template-columns:minmax(160px,1.5fr) repeat(3,minmax(120px,1fr));gap:7px;margin-top:12px}
+.filter-input,.filter-select{height:34px;min-width:0;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--palette-surface) 68%,transparent);color:var(--ink);padding:0 9px;font:10px 'DM Sans',sans-serif;outline:0}
+.filter-input:focus,.filter-select:focus{border-color:var(--palette-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--palette-accent) 13%,transparent)}
+.filter-select{cursor:pointer}
+.sticker-catalog>.filter-select{width:100%;margin-bottom:11px}
+@media(max-width:780px){.model-filter-row{grid-template-columns:1fr 1fr}.model-filter-row .filter-input{grid-column:1/-1}}

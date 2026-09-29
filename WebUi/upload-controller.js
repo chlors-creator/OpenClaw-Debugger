@@ -117,7 +117,7 @@
       const allowed = /\.(png|jpe?g|gif|webp|bmp)$/i;
       for (const file of files) {
         if (!allowed.test(file.name)) { showToast('不支持的图片格式：' + file.name, true); return; }
-        if (file.size < 1 || file.size > 16 * 1024 * 1024) { showToast('图片需小于等于 16 MiB：' + file.name, true); return; }
+        if (file.size < 1 || file.size > 30 * 1024 * 1024) { showToast('图片需小于等于 30 MiB：' + file.name, true); return; }
       }
       state.inProgress = true;
       state.cancelRequested = false;
@@ -131,9 +131,40 @@
       setUploadUi(true, '准备上传…');
       const registrationFailures = [];
       try {
+        const completeUpload = async (result, file, fileIndex) => {
+          state.rows = result.stickerFiles || state.rows;
+          if (typeof result.catalogText === 'string') state.catalog = result.catalogText;
+          if (typeof result.manifestText === 'string') state.manifest = result.manifestText;
+          state.originalRows = snapshotStickerRows();
+          state.editingEnabled = Boolean(result.stickerEditingEnabled);
+          state.dirtyStickers = false;
+          $('#stickerCount').textContent = result.stickerCount;
+          $('#stickerListCount').textContent = state.rows.length;
+          $('#saveStickerButton').disabled = !state.editingEnabled;
+          renderStickerList(); setDirtyState();
+          $('#stickerStatus').textContent = result.registered === false ? '图片已上传，但自动登记失败：' + (result.registrationError || '请检查目录文件。') : '图片已上传并自动登记为无标签条目，可直接在目录中添加标签。';
+          if (result.registered === false) registrationFailures.push(file.name);
+          state.transferredBeforeFile += file.size;
+          state.uploadId = null;
+          setStatus('上传完成：' + result.fileName + ' · ' + sizeLabel(result.size));
+          $('#uploadProgress').textContent = '已上传 ' + file.name + ' · ' + (fileIndex + 1) + '/' + files.length;
+          const added = state.rows.find(row => row.imagePath === result.fileName);
+          if (added) await selectSticker(added);
+        };
         for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
           const file = files[fileIndex];
           if (controller.signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+          // WebView2 can pass the DOM File as a native file object. The host then
+          // opens it with a fixed-size stream, avoiding Base64 and a whole-file
+          // arrayBuffer. Older runtimes fall back to the resumable chunk protocol.
+          if (typeof window.chrome?.webview?.postMessageWithAdditionalObjects === 'function') {
+            $('#uploadProgress').textContent = file.name + ' · 正在流式传输…';
+            const result = await bridgeCall('streamStickerUpload', { fileName: file.name, size: file.size }, {
+              signal: controller.signal, additionalObjects: [file]
+            });
+            await completeUpload(result, file, fileIndex);
+            continue;
+          }
           const started = await bridgeCall('beginStickerUpload', { fileName: file.name, size: file.size }, { signal: controller.signal });
           state.uploadId = started.uploadId;
           try {
@@ -149,24 +180,7 @@
               renderUploadProgress(file, fileIndex, files.length, received, file.size, chunkIndex + 1, chunkCount);
             }
             const result = await bridgeCall('commitStickerUpload', { uploadId: started.uploadId }, { signal: controller.signal });
-            state.rows = result.stickerFiles || state.rows;
-            if (typeof result.catalogText === 'string') state.catalog = result.catalogText;
-            if (typeof result.manifestText === 'string') state.manifest = result.manifestText;
-            state.originalRows = snapshotStickerRows();
-            state.editingEnabled = Boolean(result.stickerEditingEnabled);
-            state.dirtyStickers = false;
-            $('#stickerCount').textContent = result.stickerCount;
-            $('#stickerListCount').textContent = state.rows.length;
-            $('#saveStickerButton').disabled = !state.editingEnabled;
-            renderStickerList(); setDirtyState();
-            $('#stickerStatus').textContent = result.registered === false ? '图片已上传，但自动登记失败：' + (result.registrationError || '请检查目录文件。') : '图片已上传并自动登记为无标签条目，可直接在目录中添加标签。';
-            if (result.registered === false) registrationFailures.push(file.name);
-            state.transferredBeforeFile += file.size;
-            state.uploadId = null;
-            setStatus('上传完成：' + result.fileName + ' · ' + sizeLabel(result.size));
-            $('#uploadProgress').textContent = '已上传 ' + file.name + ' · ' + (fileIndex + 1) + '/' + files.length;
-            const added = state.rows.find(row => row.imagePath === result.fileName);
-            if (added) await selectSticker(added);
+            await completeUpload(result, file, fileIndex);
           } catch (error) {
             await bridgeCall('cancelStickerUpload', { uploadId: started.uploadId }).catch(() => {});
             throw error;

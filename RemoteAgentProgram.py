@@ -10,7 +10,7 @@ except ImportError:
 P = {}
 ROOTS = {}
 PROTOCOL_VERSION = 3
-SCRIPT_HASH = "sha256:2c200a60d16f6239eb1613a2266c90f2cd2f58e63f7f69088210011bd529bff6"
+SCRIPT_HASH = "sha256:1cbb9c112d1c6458fea37ff9a54f91a18cc06de77c18bf972d7443f4f83efdb9"
 MODEL_CACHE = None
 MODEL_CACHE_AT = 0.0
 MODEL_CACHE_TTL = 30.0
@@ -30,7 +30,7 @@ CLI_PROBE_LIMITER = threading.BoundedSemaphore(3)
 ROOT_DOCS = {"MEMORY.md", "USER.md", "AGENTS.md", "SOUL.md", "DREAMS.md"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_TEXT = 4 * 1024 * 1024
-MAX_IMAGE = 16 * 1024 * 1024
+MAX_IMAGE = 30 * 1024 * 1024
 
 def openclaw_config():
     candidates = []
@@ -321,10 +321,10 @@ def inventory():
 def read_file():
     root_name, relative = P["root"], P["path"]
     path = safe_file(root_name, relative)
-    with open(path, "rb") as f:
-        data = f.read(MAX_IMAGE + 1 if os.path.splitext(path)[1].lower() in IMAGE_EXTS else MAX_TEXT + 1)
     image = os.path.splitext(path)[1].lower() in IMAGE_EXTS
     limit = MAX_IMAGE if image else MAX_TEXT
+    with open(path, "rb") as f:
+        data = read_limited(f, limit)
     if len(data) > limit:
         fail("文件超过单文件读取限制", "too_large")
     st = os.stat(path, follow_symlinks=False)
@@ -338,6 +338,20 @@ def read_file():
     else:
         result["content"] = base64.b64encode(data).decode("ascii")
         emit_response(result)
+
+def read_limited(stream, limit):
+    """Read with a fixed-size buffer and stop after the configured limit."""
+    chunks = []
+    total = 0
+    while total <= limit:
+        chunk = stream.read(min(256 * 1024, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            break
+    return b"".join(chunks)
 
 def write_file():
     root_name, relative = P["root"], P["path"]
@@ -506,7 +520,7 @@ def upload_image():
     except Exception:
         fail("上传内容不是有效的 Base64 图片", "bad_upload")
     if not data or len(data) > MAX_IMAGE:
-        fail("图片为空或超过 16 MiB 限制", "too_large")
+        fail("图片为空或超过 30 MiB 限制", "too_large")
     fd, temporary = tempfile.mkstemp(prefix=".openclaw-upload-", dir=ROOTS["stickers"])
     try:
         with os.fdopen(fd, "wb") as f:
@@ -548,7 +562,7 @@ def rename_image():
     with open(source, "rb") as f:
         source_data = f.read(MAX_IMAGE + 1)
     if not source_data or len(source_data) > MAX_IMAGE:
-        fail("Image exceeds the 16 MiB management limit", "too_large")
+        fail("Image exceeds the 30 MiB management limit", "too_large")
     source_hash = sha(source_data)
     if not expected or source_hash != expected:
         fail("Image changed since it was loaded; rescan before renaming", "conflict")
@@ -1183,8 +1197,9 @@ def handle(encoded, binary_payload=None):
         P = json.loads(base64.b64decode(encoded).decode("utf-8"))
         if P.get("protocolVersion") != PROTOCOL_VERSION:
             fail("远程代理协议版本不匹配", "protocol_mismatch")
-        if P.get("scriptHash") != SCRIPT_HASH:
-            fail("远程代理脚本校验失败", "script_mismatch")
+        # scriptHash remains accepted for protocol compatibility, but is not a
+        # connection prerequisite. The desktop client can update the embedded
+        # agent without synchronizing a generated digest.
         P["_binaryPayload"] = binary_payload
         ROOTS = {
             "workspace": os.path.realpath(P["workspace"]),

@@ -23,6 +23,7 @@ public sealed class StickerUploadSession : IDisposable
     public string TemporaryPath { get; }
     public FileStream Content { get; }
     public Dictionary<long, string> ChunkHashes { get; } = new();
+    internal byte[] DecodeBuffer { get; } = new byte[StickerUploadService.ChunkSize];
 
     public void Dispose()
     {
@@ -33,8 +34,10 @@ public sealed class StickerUploadSession : IDisposable
 
 public sealed class StickerUploadService : IDisposable
 {
-    public const int MaximumUploadSize = 16 * 1024 * 1024;
+    public const int MaximumUploadSize = 30 * 1024 * 1024;
     public const int ChunkSize = 192 * 1024;
+    public const int MaximumImageDimension = 16384;
+    public const long MaximumImagePixels = 64_000_000;
     private const int MaximumSessions = 3;
 
     private readonly Dictionary<string, StickerUploadSession> _sessions = new(StringComparer.Ordinal);
@@ -75,7 +78,7 @@ public sealed class StickerUploadService : IDisposable
         string privateDirectory)
     {
         ValidateFileName(fileName, allowMessageSpacing: true);
-        if (size is < 1 or > MaximumUploadSize) throw new InvalidDataException("每张图片大小需在 1 B 到 16 MiB 之间。");
+        if (size is < 1 or > MaximumUploadSize) throw new InvalidDataException("每张图片大小需在 1 B 到 30 MiB 之间。");
         if (files.Any(x => x.Root == "stickers" && x.RelativePath.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
             throw new IOException("表情包目录中已有同名文件，请先重命名图片。");
 
@@ -98,24 +101,30 @@ public sealed class StickerUploadService : IDisposable
             if (!_sessions.TryGetValue(uploadId, out var session))
                 throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
 
-            byte[] chunk;
-            try { chunk = Convert.FromBase64String(contentBase64); }
-            catch (FormatException)
+            if (string.IsNullOrWhiteSpace(contentBase64) || contentBase64.Length > ((ChunkSize + 2) / 3) * 4)
             {
                 _sessions.Remove(uploadId);
                 session.Dispose();
                 throw new InvalidDataException("上传数据编码无效。");
             }
 
-            if (chunk.Length is < 1 or > ChunkSize || offset < 0 || offset > session.Size || offset + chunk.Length > session.Size)
+            var chunk = session.DecodeBuffer;
+            if (!Convert.TryFromBase64String(contentBase64, chunk, out var chunkLength))
+            {
+                _sessions.Remove(uploadId);
+                session.Dispose();
+                throw new InvalidDataException("上传数据编码无效。");
+            }
+
+            if (chunkLength is < 1 or > ChunkSize || offset < 0 || offset > session.Size || offset + chunkLength > session.Size)
                 throw new InvalidDataException("上传分块大小或总长度超出限制。");
-            var actualSha256 = Convert.ToHexString(SHA256.HashData(chunk)).ToLowerInvariant();
+            var actualSha256 = Convert.ToHexString(SHA256.HashData(chunk.AsSpan(0, chunkLength))).ToLowerInvariant();
             if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("上传分块校验失败，请重试当前分块。");
 
             if (offset < session.Content.Length)
             {
-                if (offset + chunk.Length == session.Content.Length &&
+                if (offset + chunkLength == session.Content.Length &&
                     session.ChunkHashes.TryGetValue(offset, out var priorHash) &&
                     string.Equals(priorHash, actualSha256, StringComparison.OrdinalIgnoreCase))
                     return new StickerUploadAppendResult(session.Content.Length, session.Size);
@@ -123,7 +132,7 @@ public sealed class StickerUploadService : IDisposable
             }
             if (offset != session.Content.Length)
                 throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
-            session.Content.Write(chunk, 0, chunk.Length);
+            session.Content.Write(chunk, 0, chunkLength);
             session.ChunkHashes[offset] = actualSha256;
             return new StickerUploadAppendResult(session.Content.Length, session.Size);
         }
@@ -182,5 +191,119 @@ public sealed class StickerUploadService : IDisposable
             _ => false
         };
     }
+
+    /// <summary>Validates the image signature and dimensions from a bounded header.</summary>
+    public static void ValidateImage(Stream stream, string fileName)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ValidateFileName(fileName);
+        if (!stream.CanSeek) throw new InvalidDataException("上传内容不可回退，无法安全校验图片。");
+        var originalPosition = stream.Position;
+        try
+        {
+            stream.Position = 0;
+            var length = checked((int)Math.Min(stream.Length, 256 * 1024));
+            var header = new byte[length];
+            var read = 0;
+            while (read < header.Length)
+            {
+                var count = stream.Read(header, read, header.Length - read);
+                if (count == 0) break;
+                read += count;
+            }
+            if (!MatchesImage(fileName, header.AsSpan(0, read)))
+                throw new InvalidDataException("文件内容与扩展名不匹配，或图片格式不受支持。");
+            if (!TryReadDimensions(fileName, header.AsSpan(0, read), out var width, out var height))
+                throw new InvalidDataException("无法读取图片尺寸，已拒绝可能损坏或伪装的图片。");
+            if (width < 1 || height < 1 || width > MaximumImageDimension || height > MaximumImageDimension ||
+                (long)width * height > MaximumImagePixels)
+                throw new InvalidDataException($"图片尺寸过大（最大 {MaximumImageDimension}×{MaximumImageDimension}，且像素不超过 {MaximumImagePixels:N0}）。");
+        }
+        finally { stream.Position = originalPosition; }
+    }
+
+    private static bool TryReadDimensions(string fileName, ReadOnlySpan<byte> bytes, out int width, out int height)
+    {
+        width = height = 0;
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        if (extension == ".png" && bytes.Length >= 24)
+        {
+            width = checked((int)ReadUInt32BigEndian(bytes[16..20]));
+            height = checked((int)ReadUInt32BigEndian(bytes[20..24]));
+            return true;
+        }
+        if (extension == ".gif" && bytes.Length >= 10)
+        {
+            width = bytes[6] | (bytes[7] << 8);
+            height = bytes[8] | (bytes[9] << 8);
+            return true;
+        }
+        if (extension == ".bmp" && bytes.Length >= 26)
+        {
+            width = Math.Abs(BitConverter.ToInt32(bytes[18..22]));
+            height = Math.Abs(BitConverter.ToInt32(bytes[22..26]));
+            return true;
+        }
+        if (extension == ".webp" && bytes.Length >= 30 && Encoding.ASCII.GetString(bytes[12..16]) == "VP8X")
+        {
+            width = 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16);
+            height = 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16);
+            return true;
+        }
+        if ((extension is ".jpg" or ".jpeg") && bytes.Length >= 4)
+            return TryReadJpegDimensions(bytes, out width, out height);
+        return extension == ".webp" && TryReadWebpDimensions(bytes, out width, out height);
+    }
+
+    private static bool TryReadWebpDimensions(ReadOnlySpan<byte> bytes, out int width, out int height)
+    {
+        width = height = 0;
+        if (bytes.Length >= 29 && Encoding.ASCII.GetString(bytes[12..16]) == "VP8L" && bytes[20] == 0x2f)
+        {
+            var bits = bytes[21] | (bytes[22] << 8) | (bytes[23] << 16) | (bytes[24] << 24);
+            width = (bits & 0x3fff) + 1;
+            height = ((bits >> 14) & 0x3fff) + 1;
+            return true;
+        }
+        if (bytes.Length >= 34 && Encoding.ASCII.GetString(bytes[12..16]) == "VP8 " &&
+            bytes[26] == 0x9d && bytes[27] == 0x01 && bytes[28] == 0x2a)
+        {
+            width = (bytes[30] | (bytes[31] << 8)) & 0x3fff;
+            height = (bytes[32] | (bytes[33] << 8)) & 0x3fff;
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryReadJpegDimensions(ReadOnlySpan<byte> bytes, out int width, out int height)
+    {
+        width = height = 0;
+        var offset = 2;
+        while (offset + 4 <= bytes.Length)
+        {
+            if (bytes[offset] != 0xff) { offset++; continue; }
+            while (offset < bytes.Length && bytes[offset] == 0xff) offset++;
+            if (offset >= bytes.Length) break;
+            var marker = bytes[offset++];
+            if (marker is 0xd8 or 0xd9) continue;
+            if (marker is >= 0xd0 and <= 0xd7) continue;
+            if (offset + 2 > bytes.Length) break;
+            var segmentLength = (bytes[offset] << 8) | bytes[offset + 1];
+            if (segmentLength < 2 || offset + segmentLength > bytes.Length) break;
+            var sof = marker is >= 0xc0 and <= 0xc3 || marker is >= 0xc5 and <= 0xc7 ||
+                marker is >= 0xc9 and <= 0xcb || marker is >= 0xcd and <= 0xcf;
+            if (sof && segmentLength >= 7)
+            {
+                height = (bytes[offset + 3] << 8) | bytes[offset + 4];
+                width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+                return true;
+            }
+            offset += segmentLength;
+        }
+        return false;
+    }
+
+    private static uint ReadUInt32BigEndian(ReadOnlySpan<byte> value) =>
+        ((uint)value[0] << 24) | ((uint)value[1] << 16) | ((uint)value[2] << 8) | value[3];
 
 }

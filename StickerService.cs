@@ -430,6 +430,28 @@ public sealed class StickerService : IDisposable
         return _uploads.Append(uploadId, offset, contentBase64, sha256);
     }
 
+    public async Task<object> UploadFileAsync(JsonElement payload, string sourcePath, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        var fileName = payload.GetProperty("fileName").GetString() ?? "";
+        var size = payload.GetProperty("size").GetInt64();
+        StickerUploadService.ValidateFileName(fileName, allowMessageSpacing: true);
+        if (size is < 1 or > StickerUploadService.MaximumUploadSize)
+            throw new InvalidDataException("每张图片大小需在 1 B 到 30 MiB 之间。");
+        var fullPath = Path.GetFullPath(sourcePath);
+        var info = new FileInfo(fullPath);
+        if (!info.Exists || info.Attributes.HasFlag(FileAttributes.ReparsePoint) || info.Length != size ||
+            !string.Equals(info.Name, fileName, StringComparison.Ordinal))
+            throw new InvalidDataException("本地上传文件已不存在、发生变化或文件名不匹配。");
+        using var source = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        StickerUploadService.ValidateImage(source, fileName);
+        source.Position = 0;
+        _setBusy(true);
+        try { return await CommitUploadedStreamAsync(fileName, source, size, cancellationToken); }
+        finally { _setBusy(false); }
+    }
+
     public async Task<object> CommitUploadAsync(JsonElement payload, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
@@ -437,18 +459,20 @@ public sealed class StickerService : IDisposable
         using var session = _uploads.TakeForCommit(uploadId);
         try
         {
-        if (session.Content.Length != session.Size) throw new InvalidDataException("上传内容长度不完整，请重新上传。");
-        session.Content.Flush(flushToDisk: true);
-        session.Content.Position = 0;
-        var header = new byte[Math.Min(16 * 1024, checked((int)session.Size))];
-        var headerBytes = await session.Content.ReadAsync(header.AsMemory(0, header.Length));
-        if (!StickerUploadService.MatchesImage(session.FileName, header.AsSpan(0, headerBytes).ToArray()))
-            throw new InvalidDataException("文件内容与扩展名不匹配，或图片格式不受支持。");
-        session.Content.Position = 0;
-        EnsureCatalogLoaded();
+            if (session.Content.Length != session.Size) throw new InvalidDataException("上传内容长度不完整，请重新上传。");
+            session.Content.Flush(flushToDisk: true);
+            StickerUploadService.ValidateImage(session.Content, session.FileName);
+            session.Content.Position = 0;
+            return await CommitUploadedStreamAsync(session.FileName, session.Content, session.Size, cancellationToken);
+        }
+        finally { _setBusy(false); }
+    }
 
+    private async Task<object> CommitUploadedStreamAsync(string fileName, Stream source, long size, CancellationToken cancellationToken)
+    {
+        EnsureCatalogLoaded();
         var existingRows = _catalog!.Rows.ToList();
-        if (!_catalog.TryAddImage(session.FileName, out var addedRow, out var addError))
+        if (!_catalog.TryAddImage(fileName, out var addedRow, out var addError))
             throw new InvalidDataException(addError);
         var updatedCatalog = _catalog.SerializeWithEdits();
         if (!StickerManifestSynchronizer.TryAppendRow(_manifestContent!.Text!, existingRows, addedRow,
@@ -465,35 +489,24 @@ public sealed class StickerService : IDisposable
             throw new InvalidDataException("图片尚未上传，无法校验自动登记：" + verifyError);
         }
 
-            RemoteStickerUploadResult uploaded;
-            try { uploaded = await _stickersRemote.UploadStickerAsync(_connection(), session.FileName, session.Content, session.Size, cancellationToken); }
-            catch { RestoreCatalog(); throw; }
+        RemoteStickerUploadResult uploaded;
+        try
+        {
+            source.Position = 0;
+            uploaded = await _stickersRemote.UploadStickerAsync(_connection(), fileName, source, size, cancellationToken);
+        }
+        catch { RestoreCatalog(); throw; }
 
-            _files = _files.Append(new RemoteFile
-            {
-                Root = "stickers", RelativePath = uploaded.RelativePath, Kind = "image", Size = uploaded.Size,
-                Sha256 = uploaded.Sha256, ModifiedUtc = DateTimeOffset.UtcNow, Editable = false
-            }).ToList();
+        _files = _files.Append(new RemoteFile
+        {
+            Root = "stickers", RelativePath = uploaded.RelativePath, Kind = "image", Size = uploaded.Size,
+            Sha256 = uploaded.Sha256, ModifiedUtc = DateTimeOffset.UtcNow, Editable = false
+        }).ToList();
 
-            try { await SavePairAsync(updatedCatalog, updatedManifest, cancellationToken); }
-            catch (Exception registrationError)
-            {
-                RestoreCatalog();
-                return new
-                {
-                    fileName = uploaded.RelativePath,
-                    size = uploaded.Size,
-                    sha256 = uploaded.Sha256,
-                    stickerCount = _files.Count(x => x.Root == "stickers" && x.IsImage),
-                    stickerFiles = GetUiRows(),
-                    stickerEditingEnabled = _catalog is not null,
-                    registered = false,
-                    registrationError = registrationError.Message,
-                    catalogText = _catalogContent?.Text,
-                    manifestText = _manifestContent?.Text
-                };
-            }
-
+        try { await SavePairAsync(updatedCatalog, updatedManifest, cancellationToken); }
+        catch (Exception registrationError)
+        {
+            RestoreCatalog();
             return new
             {
                 fileName = uploaded.RelativePath,
@@ -502,13 +515,26 @@ public sealed class StickerService : IDisposable
                 stickerCount = _files.Count(x => x.Root == "stickers" && x.IsImage),
                 stickerFiles = GetUiRows(),
                 stickerEditingEnabled = _catalog is not null,
-                registered = true,
-                registrationError = "",
+                registered = false,
+                registrationError = registrationError.Message,
                 catalogText = _catalogContent?.Text,
                 manifestText = _manifestContent?.Text
             };
         }
-        finally { _setBusy(false); }
+
+        return new
+        {
+            fileName = uploaded.RelativePath,
+            size = uploaded.Size,
+            sha256 = uploaded.Sha256,
+            stickerCount = _files.Count(x => x.Root == "stickers" && x.IsImage),
+            stickerFiles = GetUiRows(),
+            stickerEditingEnabled = _catalog is not null,
+            registered = true,
+            registrationError = "",
+            catalogText = _catalogContent?.Text,
+            manifestText = _manifestContent?.Text
+        };
     }
 
     public void CancelUpload(JsonElement payload)

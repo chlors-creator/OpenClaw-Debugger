@@ -22,6 +22,9 @@ sealed class TestSuite
         await RunAsync("桥接协议参数校验", BridgePayloadValidationAsync);
         await RunAsync("旧请求状态保护", StaleRequestGuardAsync);
         await RunAsync("结构化日志脱敏", StructuredLogAsync);
+        await RunAsync("统一远程任务队列", UnifiedTaskSchedulerAsync);
+        await RunAsync("图片大小与尺寸安全检查", UploadSecurityAsync);
+        await RunAsync("目录筛选控件", SearchFilterContractAsync);
         await RunAsync("模型拖拽自动保存", ModelAutoSaveContractAsync);
         Console.WriteLine($"通过 {_passed} 项，失败 {_failed} 项。" );
         if (_failed > 0) Environment.ExitCode = 1;
@@ -148,6 +151,54 @@ sealed class TestSuite
         Assert(!text.Contains("secret", StringComparison.OrdinalIgnoreCase), "日志不应暴露敏感参数");
         Assert(!text.Contains("C:\\Users\\private", StringComparison.OrdinalIgnoreCase), "日志不应暴露本地路径");
         Delete(root);
+        return Task.CompletedTask;
+    }
+
+    private static async Task UnifiedTaskSchedulerAsync()
+    {
+        var states = new List<RemoteTaskStatus>();
+        using var scheduler = new RemoteTaskScheduler(states.Add);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = scheduler.EnqueueAsync("op-1", "backup", async token =>
+        {
+            firstStarted.TrySetResult(true);
+            await release.Task.WaitAsync(token);
+            return (object?)new { done = true };
+        });
+        await firstStarted.Task;
+        var second = scheduler.EnqueueAsync("op-2", "getModels", _ => Task.FromResult<object?>(new { done = true }));
+        await Task.Delay(30);
+        Assert(states.Any(item => item.OperationId == "op-2" && item.State == "queued"), "第二个远程任务应进入等待状态");
+        Assert(!second.IsCompleted, "队列中的任务不能与当前 SSH 任务并行执行");
+        release.TrySetResult(true);
+        await Task.WhenAll(first, second);
+        Assert(states.Any(item => item.OperationId == "op-1" && item.State == "completed"), "第一个任务应完成");
+        Assert(states.Any(item => item.OperationId == "op-2" && item.State == "running"), "第二个任务应在前一个完成后运行");
+    }
+
+    private static Task UploadSecurityAsync()
+    {
+        var png = new byte[24];
+        png[0..8].AsSpan().CopyTo(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        png[16] = 0; png[19] = 1; png[20] = 0; png[23] = 1;
+        using var stream = new MemoryStream(png);
+        StickerUploadService.ValidateImage(stream, "safe.png");
+        Assert(StickerUploadService.MaximumUploadSize == 30 * 1024 * 1024, "上传上限应为 30 MiB");
+        AssertThrows<InvalidDataException>(() => StickerUploadService.ValidateFileName("..\\escape.png"));
+        return Task.CompletedTask;
+    }
+
+    private static Task SearchFilterContractAsync()
+    {
+        var sourceRoot = FindSourceRoot();
+        var model = File.ReadAllText(Path.Combine(sourceRoot, "WebUi", "model-controller.js"));
+        var stickers = File.ReadAllText(Path.Combine(sourceRoot, "WebUi", "sticker-controller.js"));
+        var html = File.ReadAllText(Path.Combine(sourceRoot, "WebUi", "index.html"));
+        Assert(model.Contains("matchesModelFilters", StringComparison.Ordinal), "模型应提供统一筛选逻辑");
+        Assert(html.Contains("modelProviderFilter", StringComparison.Ordinal) && html.Contains("modelLatencyFilter", StringComparison.Ordinal), "模型页应提供提供商和延迟筛选");
+        Assert(html.Contains("stickerTagFilter", StringComparison.Ordinal) && stickers.Contains("syncTagFilter", StringComparison.Ordinal), "表情包页应提供标签筛选");
+        Assert(File.Exists(Path.Combine(sourceRoot, "WindowsCredentialStore.cs")), "应提供 Windows Credential Manager 适配层");
         return Task.CompletedTask;
     }
 

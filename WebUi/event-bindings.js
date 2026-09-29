@@ -56,6 +56,7 @@
     $('#saveMemoryButton').addEventListener('click', saveMemory);
     $('#memorySearch').addEventListener('input', renderMemoryList);
     $('#stickerSearch').addEventListener('input', renderStickerList);
+    $('#stickerTagFilter').addEventListener('change', renderStickerList);
     $('#saveStickerButton').addEventListener('click', saveStickerRows);
     $('#rawStickerButton').addEventListener('click', openRawEditor);
     $('#resetColors').addEventListener('click', () => {

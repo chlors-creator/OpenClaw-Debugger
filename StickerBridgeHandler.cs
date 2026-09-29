@@ -19,6 +19,9 @@ public sealed class StickerBridgeHandler
         router.Map("beginStickerUpload", payload => Task.FromResult<object?>(Require().BeginUpload(payload)));
         router.Map("appendStickerUpload", payload => Task.FromResult<object?>(Require().AppendUpload(payload)));
         router.Map("commitStickerUpload", async (payload, cancellationToken) => await Require().CommitUploadAsync(payload, cancellationToken));
+        // The host dispatches this command with a CoreWebView2File additional object
+        // so the source is streamed from disk without JSON/Base64 copies.
+        router.Map("streamStickerUpload", (_, _) => throw new InvalidOperationException("流式上传缺少本地文件对象。"));
         router.Map("cancelStickerUpload", payload => CancelUpload(payload));
         router.Map("renameSticker", async (payload, cancellationToken) => await Require().RenameAsync(payload, cancellationToken));
     }

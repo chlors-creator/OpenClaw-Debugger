@@ -227,8 +227,48 @@
       return row;
     }
 
+    function syncModelFilterOptions(snapshot) {
+      const all = allModels(snapshot);
+      const provider = $('#modelProviderFilter');
+      const status = $('#modelStatusFilter');
+      if (provider) {
+        const current = provider.value;
+        const values = [...new Set(all.map(model => String(model.provider || '').trim()).filter(Boolean))]
+          .sort((a, b) => a.localeCompare(b, 'en'));
+        provider.replaceChildren(new Option('全部提供商', ''), ...values.map(value => new Option(value, value.toLowerCase())));
+        if ([...provider.options].some(option => option.value === current)) provider.value = current;
+      }
+      if (status) {
+        const current = status.value;
+        const values = [...new Set(all.map(model => String(model.status || '').trim()).filter(Boolean))]
+          .sort((a, b) => a.localeCompare(b, 'en'));
+        status.replaceChildren(new Option('全部状态', ''), ...values.map(value => new Option(value, value.toLowerCase())));
+        if ([...status.options].some(option => option.value === current)) status.value = current;
+      }
+    }
+
+    function matchesModelFilters(model) {
+      const query = ($('#modelSearch')?.value || '').trim().toLowerCase();
+      const provider = ($('#modelProviderFilter')?.value || '').trim().toLowerCase();
+      const latencyFilter = ($('#modelLatencyFilter')?.value || '').trim().toLowerCase();
+      const status = ($('#modelStatusFilter')?.value || '').trim().toLowerCase();
+      const searchText = [model.id, model.name, model.provider, model.alias, model.status]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (query && !searchText.includes(query)) return false;
+      if (provider && String(model.provider || '').toLowerCase() !== provider) return false;
+      if (status && String(model.status || '').toLowerCase() !== status) return false;
+      if (latencyFilter) {
+        const category = latencyInfo(model).className === 'latency-fast' ? 'fast' :
+          latencyInfo(model).className === 'latency-medium' ? 'medium' :
+            latencyInfo(model).className === 'latency-slow' ? 'slow' : 'unset';
+        if (category !== latencyFilter) return false;
+      }
+      return true;
+    }
+
     function renderAvailable(snapshot) {
       const list = $('#modelAvailableList');
+      syncModelFilterOptions(snapshot);
       if (!list.dataset.dropBound) {
         list.dataset.dropBound = 'true';
         list.setAttribute('aria-label', '可用模型；将备选模型拖到这里可移出备选队列');
@@ -262,7 +302,7 @@
       const selected = new Set(selectedModels(snapshot).map(model => String(model.id || '').toLowerCase()));
       const models = (snapshot && snapshot.available || []).filter(model => {
         const id = String(model && model.id || '').toLowerCase();
-        return id && !selected.has(id);
+        return id && !selected.has(id) && matchesModelFilters(model);
       });
       if (!models.length) {
         list.replaceChildren();
@@ -648,6 +688,10 @@
       render();
     }
 
+    ['modelSearch', 'modelProviderFilter', 'modelLatencyFilter', 'modelStatusFilter'].forEach(id => {
+      const element = $('#' + id);
+      element?.addEventListener(id === 'modelSearch' ? 'input' : 'change', () => render());
+    });
     return { load, render, testLatency, openAddDialog, submitAdd, reset, syncButtons };
   }
 

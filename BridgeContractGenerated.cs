@@ -213,6 +213,17 @@ internal static class BridgeContractGenerated
                     ["uploadId"] = "string",
                 }
             },
+            ["streamStickerUpload"] = new BridgeCommandDefinition
+            {
+                Mode = "upload",
+                Domain = "upload",
+                TimeoutMs = 1800000,
+                Payload = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["fileName"] = "string",
+                    ["size"] = "integer",
+                }
+            },
             ["cancelStickerUpload"] = new BridgeCommandDefinition
             {
                 Mode = "uploadCancel",

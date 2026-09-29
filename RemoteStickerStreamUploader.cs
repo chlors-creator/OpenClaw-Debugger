@@ -26,8 +26,8 @@ try:
         fail("上传文件名或表情包目录无效", "bad_upload")
     if len(filename) > 180 or PurePosixPath(filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
         fail("仅允许 PNG、JPG、GIF、WEBP、BMP 图片，文件名最长 180 个字符", "bad_upload")
-    if size < 1 or size > 16 * 1024 * 1024:
-        fail("图片为空或超过 16 MiB 限制", "too_large")
+    if size < 1 or size > 30 * 1024 * 1024:
+        fail("图片为空或超过 30 MiB 限制", "too_large")
     target = os.path.join(stickers, filename)
     if os.path.commonpath([stickers, os.path.realpath(os.path.dirname(target))]) != stickers or os.path.lexists(target):
         fail("服务器已存在同名表情包，请先重命名本地文件", "conflict")
@@ -78,7 +78,8 @@ except Exception as error:
     {
         SshCommandRunner.ValidateSettings(settings);
         if (source is null) throw new ArgumentNullException(nameof(source));
-        if (size is < 1 or > 16 * 1024 * 1024) throw new InvalidDataException("图片为空或超过 16 MiB 限制。");
+        if (size is < 1 or > 30 * 1024 * 1024) throw new InvalidDataException("图片为空或超过 30 MiB 限制。");
+        StickerUploadService.ValidateImage(source, fileName);
         var start = new ProcessStartInfo
         {
             FileName = SshCommandRunner.ResolveExecutable(),

@@ -39,7 +39,14 @@
   function renderStickerList() {
     const list = $('#stickerList');
     const query = $('#stickerSearch').value.trim().toLowerCase();
-    const filtered = state.rows.filter(row => row.imagePath.toLowerCase().includes(query) || (row.tagsText || '').toLowerCase().includes(query));
+    const tagFilter = ($('#stickerTagFilter')?.value || '').trim().toLowerCase();
+    syncTagFilter();
+    const filtered = state.rows.filter(row => {
+      const tagsText = (row.tagsText || '').toLowerCase();
+      const tags = tagsText.split(/[,，、\s]+/).map(tag => tag.trim()).filter(Boolean);
+      return (row.imagePath.toLowerCase().includes(query) || tagsText.includes(query)) &&
+        (!tagFilter || tags.includes(tagFilter));
+    });
     $('#stickerListCount').textContent = filtered.length;
     if (!filtered.length) {
       if (list._virtualStickerList) list._virtualStickerList.clear();
@@ -59,6 +66,16 @@
     const fragment = document.createDocumentFragment();
     filtered.forEach(row => fragment.appendChild(createStickerCard(row)));
     list.replaceChildren(fragment);
+  }
+
+  function syncTagFilter() {
+    const select = $('#stickerTagFilter');
+    if (!select) return;
+    const current = select.value;
+    const tags = [...new Set(state.rows.flatMap(row => (row.tagsText || '').split(/[,，、\s]+/)
+      .map(tag => tag.trim()).filter(Boolean)))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    select.replaceChildren(new Option('全部标签', ''), ...tags.map(tag => new Option(tag, tag.toLowerCase())));
+    if ([...select.options].some(option => option.value === current)) select.value = current;
   }
 
   function snapshotStickerRows() {

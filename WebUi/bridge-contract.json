@@ -20,6 +20,7 @@
     "beginStickerUpload": { "mode": "uploadStart", "domain": "edit", "timeoutMs": 30000, "payload": { "fileName": "string", "size": "integer" } },
     "appendStickerUpload": { "mode": "uploadChunk", "domain": "upload", "timeoutMs": 60000, "payload": { "uploadId": "string", "offset": "integer", "contentBase64": "string", "sha256": "string" } },
     "commitStickerUpload": { "mode": "uploadFinalize", "domain": "edit", "timeoutMs": 1800000, "payload": { "uploadId": "string" } },
+    "streamStickerUpload": { "mode": "upload", "domain": "upload", "timeoutMs": 1800000, "payload": { "fileName": "string", "size": "integer" } },
     "cancelStickerUpload": { "mode": "uploadCancel", "domain": "control", "timeoutMs": 15000, "payload": { "uploadId": "string" } },
     "renameSticker": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "oldFileName": "string", "newFileName": "string" } },
     "backup": { "mode": "remote", "domain": "backup", "timeoutMs": 7200000, "payload": {} },

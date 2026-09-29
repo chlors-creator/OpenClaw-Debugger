@@ -438,6 +438,14 @@
   async function boot() {
     appState.bridge = window.OpenClawBridge.create({
       onBusy: busy => setBusy(busy),
+      onTask: task => {
+        if (task.state === 'queued') {
+          const ahead = Number(task.queuePosition) || 0;
+          setStatus(ahead > 0 ? '任务排队中：前方还有 ' + ahead + ' 个操作。' : '任务正在排队…');
+        }
+        else if (task.state === 'running') setStatus('正在执行远程操作：' + (task.command || '任务') + '…');
+        else if (task.state === 'failed' && task.message) setStatus(task.message, true);
+      },
       onBackup: progress => {
         if (progress.phase === 'paused') appState.backupPaused = true;
         renderBackupProgress(progress);

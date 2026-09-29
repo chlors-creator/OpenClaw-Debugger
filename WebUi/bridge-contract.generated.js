@@ -166,6 +166,15 @@
         "uploadId": "string"
       }
     },
+    "streamStickerUpload": {
+      "mode": "upload",
+      "domain": "upload",
+      "timeoutMs": 1800000,
+      "payload": {
+        "fileName": "string",
+        "size": "integer"
+      }
+    },
     "cancelStickerUpload": {
       "mode": "uploadCancel",
       "domain": "control",

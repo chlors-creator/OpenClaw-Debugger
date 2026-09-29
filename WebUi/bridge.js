@@ -19,6 +19,7 @@
         if (message.type === 'progress') {
           if (message.command === 'busy' && typeof hooks.onBusy === 'function') hooks.onBusy(Boolean(message.data && message.data.busy));
           if (message.command === 'backup' && typeof hooks.onBackup === 'function') hooks.onBackup(message.data || {});
+          if (message.command === 'task' && typeof hooks.onTask === 'function') hooks.onTask(message.data || {});
           return;
         }
         if (!message.id || !pending.has(String(message.id))) return;
@@ -30,14 +31,17 @@
         else operation.reject(new Error(message.error || '操作失败。'));
       };
       if (window.chrome && window.chrome.webview) window.chrome.webview.addEventListener('message', onMessage);
-      function post(command, payload, id, operationId) {
-        window.chrome.webview.postMessage({
+      function post(command, payload, id, operationId, additionalObjects) {
+        const message = {
           id,
           command,
           payload: payload || {},
           protocolVersion: Number(contract.protocolVersion) || 2,
           operationId: operationId || id
-        });
+        };
+        if (additionalObjects && additionalObjects.length && typeof window.chrome.webview.postMessageWithAdditionalObjects === 'function')
+          window.chrome.webview.postMessageWithAdditionalObjects(message, additionalObjects);
+        else window.chrome.webview.postMessage(message);
       }
       return {
         ready,
@@ -71,7 +75,7 @@
               if (signal.aborted) { abortHandler(); return; }
               signal.addEventListener('abort', abortHandler, { once: true });
             }
-            post(command, payload, id, operationId);
+            post(command, payload, id, operationId, callOptions.additionalObjects);
           });
         },
         cancelAll() {

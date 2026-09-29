@@ -15,7 +15,7 @@ public partial class MainWindow : Window
     private BridgeCommandRouter? _commandRouter;
     private BridgeCommandContract? _bridgeContract;
     private readonly ConnectionCoordinator _connection;
-    private readonly SemaphoreSlim _remoteOperationGate = new(1, 1);
+    private readonly RemoteTaskScheduler _taskScheduler;
     private readonly object _busySync = new();
     private UserSettings _settings = new();
     private bool _busy;
@@ -25,6 +25,8 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        _taskScheduler = new RemoteTaskScheduler(status =>
+            _bridgeResponses.SendProgress("task", status));
         _connection = new ConnectionCoordinator(
             () => _busy,
             SetBusy,
@@ -82,33 +84,33 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<object?> DispatchAsync(string command, JsonElement payload, CancellationToken cancellationToken)
+    private async Task<object?> DispatchAsync(string operationId, string command, JsonElement payload, IReadOnlyList<CoreWebView2File> files, CancellationToken cancellationToken)
     {
         var contract = _bridgeContract ?? throw new InvalidOperationException("界面协议尚未加载。");
         var definition = contract.GetCommand(command);
-        var domain = definition.Domain ?? definition.Mode;
-        var allowedWhileBusy = domain is "control" or "upload" or "thumbnail" or "local" ||
-            definition.Mode is "uploadChunk" or "uploadFinalize" or "uploadCancel";
-        if (_busy && !allowedWhileBusy)
-            throw new InvalidOperationException("当前有操作正在进行，请等待完成或先取消当前操作。");
-
         var router = _commandRouter ?? throw new InvalidOperationException("界面命令路由器未初始化。");
-        var serialized = domain is "connection" or "read" or "edit" or "backup" or "model" ||
-            definition.Mode == "uploadFinalize";
-        if (!serialized)
-            return await router.DispatchAsync(command, payload, cancellationToken);
+        // Local UI work and explicit interruption controls do not use the SSH queue.
+        var immediate = definition.Mode is "local" ||
+            command is "toggleBackupPause" or "cancelBackup" or "cancelStickerUpload" or "close";
+        if (immediate)
+        {
+            var result = await router.DispatchAsync(command, payload, cancellationToken);
+            if (command == "toggleBackupPause")
+                _taskScheduler.ReportActive(_connection.Backup?.CurrentProgress?.Phase == "paused"
+                    ? RemoteTaskState.Paused : RemoteTaskState.Running);
+            else if (command == "cancelBackup")
+                _taskScheduler.ReportActive(RemoteTaskState.Cancelling, "正在取消备份…");
+            return result;
+        }
 
-        await _remoteOperationGate.WaitAsync(cancellationToken);
-        try
-        {
-            if (_busy && !allowedWhileBusy)
-                throw new InvalidOperationException("当前有操作正在进行，请等待完成或先取消当前操作。");
-            return await router.DispatchAsync(command, payload, cancellationToken);
-        }
-        finally
-        {
-            _remoteOperationGate.Release();
-        }
+        return await _taskScheduler.EnqueueAsync(
+            operationId,
+            command,
+            async token => command == "streamStickerUpload"
+                ? await (_connection.Stickers ?? throw new InvalidOperationException("表情包服务未初始化。"))
+                    .UploadFileAsync(payload, files.FirstOrDefault()?.Path ?? throw new InvalidDataException("没有收到本地上传文件。"), token)
+                : await router.DispatchAsync(command, payload, token),
+            cancellationToken);
     }
 
     private BridgeCommandRouter CreateCommandRouter()
@@ -170,6 +172,7 @@ public partial class MainWindow : Window
         }
         if (e.Cancel) return;
         _bridgeDispatcher?.CancelAll();
+        _taskScheduler.Dispose();
         _connection.Dispose();
     }
 

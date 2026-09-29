@@ -12,13 +12,13 @@ public sealed class BridgeDispatcher
         PropertyNameCaseInsensitive = true
     };
 
-    private readonly Func<string, JsonElement, CancellationToken, Task<object?>> _dispatch;
+    private readonly Func<string, string, JsonElement, IReadOnlyList<CoreWebView2File>, CancellationToken, Task<object?>> _dispatch;
     private readonly BridgeResponseWriter _responses;
     private readonly BridgeCommandContract _contract;
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _operations = new(StringComparer.Ordinal);
 
     public BridgeDispatcher(
-        Func<string, JsonElement, CancellationToken, Task<object?>> dispatch,
+        Func<string, string, JsonElement, IReadOnlyList<CoreWebView2File>, CancellationToken, Task<object?>> dispatch,
         BridgeResponseWriter responses,
         BridgeCommandContract contract)
     {
@@ -58,7 +58,8 @@ public sealed class BridgeDispatcher
             var operationLog = OperationLogStore.Current?.Begin(operationId, request.Command);
             try
             {
-                var result = await _dispatch(request.Command, request.Payload, operationCancellation.Token);
+                var files = args.AdditionalObjects?.OfType<CoreWebView2File>().ToArray() ?? [];
+                var result = await _dispatch(operationId, request.Command, request.Payload, files, operationCancellation.Token);
                 operationLog?.Complete();
                 _responses.Respond(id, true, result, null);
             }

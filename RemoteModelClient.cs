@@ -90,6 +90,12 @@ public sealed class RemoteModelClient : IRemoteModelClient
         RemoteModelAddRequest request,
         CancellationToken cancellationToken = default)
     {
+        var apiKey = request.ApiKey;
+        var credentialTarget = WindowsCredentialStore.ModelApiKeyTarget(settings, request.ModelRef);
+        if (!string.IsNullOrWhiteSpace(apiKey))
+            WindowsCredentialStore.Write(credentialTarget, apiKey);
+        else
+            apiKey = WindowsCredentialStore.Read(credentialTarget) ?? "";
         var payload = new JsonObject
         {
             ["action"] = "models_add",
@@ -97,7 +103,7 @@ public sealed class RemoteModelClient : IRemoteModelClient
             ["alias"] = request.Alias,
             ["displayName"] = request.DisplayName,
             ["baseUrl"] = request.BaseUrl,
-            ["apiKey"] = request.ApiKey
+            ["apiKey"] = apiKey
         };
         var response = await _remote.InvokeModelAsync(settings, payload, cancellationToken);
         return ParseSnapshot(response);
