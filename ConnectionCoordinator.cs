@@ -90,7 +90,8 @@ public sealed class ConnectionCoordinator : IDisposable
             _setBusy(true);
             try
             {
-            await SettingsRepository.SaveAsync(settings);
+                Models?.ResetCache();
+                await SettingsRepository.SaveAsync(settings);
             Files = await _remoteFiles.ConnectAndListAsync(settings.Connection, cancellationToken);
             IsConnected = true;
             Memory?.Reset();
@@ -141,6 +142,7 @@ public sealed class ConnectionCoordinator : IDisposable
                 IsConnected = false;
                 Files = [];
                 Memory?.Reset();
+                Models?.ResetCache();
                 _remote.Disconnect();
                 return new { Connected = false };
             }

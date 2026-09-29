@@ -200,12 +200,56 @@
       syncButtons();
     }
 
+    function clearLoadPhaseTimer() {
+      if (state.loadPhaseTimer) {
+        window.clearTimeout(state.loadPhaseTimer);
+        state.loadPhaseTimer = null;
+      }
+    }
+
+    function scheduleLoadPhases() {
+      clearLoadPhaseTimer();
+      state.loadPhaseTimer = window.setTimeout(() => {
+        if (!state.loading) return;
+        state.loadPhase = 'catalog';
+        syncButtons();
+        state.loadPhaseTimer = window.setTimeout(() => {
+          if (!state.loading) return;
+          state.loadPhase = 'organize';
+          syncButtons();
+        }, 420);
+      }, 180);
+    }
+
+    function cancelLatencyTest() {
+      if (!state.testing) return;
+      state.testGeneration++;
+      state.testController?.abort();
+      state.testController = null;
+      state.testing = false;
+      setStatus('模型延迟测试已取消。');
+      showToast('模型延迟测试已取消。');
+      syncButtons();
+      render();
+    }
+
     function syncButtons() {
       const connected = isConnected();
-      $('#testModelLatencyButton').disabled = !connected || state.loading || state.testing || state.saving || !allModelIds(state.snapshot).length;
+      const testButton = $('#testModelLatencyButton');
+      const canTest = allModelIds(state.snapshot).length > 0;
+      testButton.disabled = !connected || state.loading || state.saving || state.adding || (!state.testing && !canTest);
+      testButton.innerHTML = state.testing ? '✕ <span>取消测试</span>' : '◌ <span>测试延迟</span>';
+      testButton.title = state.testing ? '取消当前模型延迟测试' : '一次性测试当前、备选和全部可用模型，最多 10 个并发';
       $('#addModelButton').disabled = !connected || state.loading || state.testing || state.saving || state.adding;
       document.body.classList.toggle('model-operation-active', state.testing || state.saving || state.adding);
-      if (state.loading) $('#modelLatencyStatus').textContent = '正在读取服务器模型配置…';
+      if (state.loading) {
+        const phaseText = {
+          status: '正在读取当前模型……',
+          catalog: '正在读取可用模型目录……',
+          organize: '正在整理模型列表……'
+        };
+        $('#modelLatencyStatus').textContent = phaseText[state.loadPhase] || '正在读取服务器模型配置……';
+      }
       else if (state.testing) $("#modelLatencyStatus").textContent = "正在并发探测模型（最多 10 个同时进行），完成一个即补充下一个…";
       else if (state.saving) $('#modelLatencyStatus').textContent = state.pendingOrder ? '正在保存当前顺序，下一次加入已排队…' : '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
@@ -217,11 +261,14 @@
       // 连接成功后会自动读取一次；进入模型页时复用同一个请求，
       // 不要中止并立即重发，否则宿主仍在释放上一个 SSH 操作时会被判定为忙碌。
       if (state.loadPromise) return state.loadPromise;
-      if (state.snapshot && !state.loading) return Promise.resolve(state.snapshot);
+      if (state.snapshot && !state.loading && state.snapshotCachedAt > 0 &&
+          Date.now() - state.snapshotCachedAt < state.cacheTtlMs) return Promise.resolve(state.snapshot);
       const controller = new AbortController();
       const generation = ++state.loadGeneration;
       state.loadController = controller;
       state.loading = true;
+      state.loadPhase = 'status';
+      scheduleLoadPhases();
       syncButtons();
       let operation;
       operation = (async () => {
@@ -229,15 +276,24 @@
           const snapshot = await bridgeCall('getModels', {}, { signal: controller.signal });
           if (generation !== state.loadGeneration || controller.signal.aborted) return null;
           state.snapshot = snapshot;
+          state.snapshotCachedAt = Date.now();
+          state.loadPhase = 'organize';
           render();
+          // 给“整理模型列表”阶段一个可见的渲染机会，再结束读取状态。
+          await new Promise(resolve => window.setTimeout(resolve, 30));
           return snapshot;
         } catch (error) {
           if (!controller.signal.aborted && !(error && error.name === 'AbortError')) reportError(error);
           return null;
         } finally {
+          clearLoadPhaseTimer();
           if (state.loadController === controller) state.loadController = null;
           if (state.loadPromise === operation) state.loadPromise = null;
-          if (generation === state.loadGeneration) { state.loading = false; syncButtons(); }
+          if (generation === state.loadGeneration) {
+            state.loading = false;
+            state.loadPhase = '';
+            syncButtons();
+          }
         }
       })();
       state.loadPromise = operation;
@@ -267,6 +323,7 @@
       const ordered = resolveOrder(previous, ids);
       if (!ordered) { await load(); return; }
       applyLocalOrder(previous, ids, ordered);
+      state.snapshotCachedAt = Date.now();
       if (state.saving) {
         state.pendingOrder = ids.slice();
         setStatus('已加入备选，已排队等待当前顺序保存完成。');
@@ -309,7 +366,11 @@
       }
     }
     async function testLatency() {
-      if (!isConnected() || state.testing) return;
+      if (!isConnected()) return;
+      if (state.testing) {
+        cancelLatencyTest();
+        return;
+      }
       const models = allModelIds(state.snapshot);
       if (!models.length) { showToast('当前没有可测试的模型。', true); return; }
       state.testController?.abort();
@@ -322,6 +383,7 @@
         const result = await bridgeCall('testModelLatency', { models }, { signal: controller.signal });
         if (generation !== state.testGeneration || controller.signal.aborted) return;
         state.snapshot = result;
+        state.snapshotCachedAt = Date.now();
         render();
         setStatus('模型延迟测试完成。');
         showToast('模型延迟测试完成。');
@@ -359,6 +421,7 @@
         const result = await bridgeCall('addModel', payload, { signal: controller.signal });
         if (generation !== state.addGeneration || controller.signal.aborted) return;
         state.snapshot = result;
+        state.snapshotCachedAt = Date.now();
         $('#modelAddDialog').close('saved');
         render();
         setStatus('新模型已登记，可拖到当前模型或备选列表。');
@@ -377,8 +440,9 @@
       state.orderGeneration++;
       state.addGeneration++;
       state.loadController?.abort(); state.testController?.abort(); state.orderController?.abort(); state.addController?.abort();
+      clearLoadPhaseTimer();
       state.loadPromise = null;
-      state.snapshot = null; state.loading = false; state.testing = false; state.saving = false; state.adding = false;
+      state.snapshot = null; state.snapshotCachedAt = 0; state.loading = false; state.loadPhase = ''; state.testing = false; state.saving = false; state.adding = false;
       state.draggedId = null; state.pendingOrder = null;
       render();
     }

@@ -4,7 +4,12 @@
     create() {
       return {
         snapshot: null,
+        // 客户端模型清单缓存：连接期间短时间内重复进入模型页或刷新时复用。
+        snapshotCachedAt: 0,
+        cacheTtlMs: 30000,
         loading: false,
+        loadPhase: '',
+        loadPhaseTimer: null,
         testing: false,
         saving: false,
         adding: false,

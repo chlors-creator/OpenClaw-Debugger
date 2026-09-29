@@ -11,6 +11,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 P = {}
 ROOTS = {}
 MODEL_CACHE = None
+MODEL_CACHE_AT = 0.0
+MODEL_CACHE_TTL = 30.0
+MODEL_CACHE_SCOPE = None
 ROOT_DOCS = {"MEMORY.md", "USER.md", "AGENTS.md", "SOUL.md", "DREAMS.md"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_TEXT = 4 * 1024 * 1024
@@ -468,8 +471,10 @@ def configured_fallbacks(status):
             return [value for value in values if valid_model_ref(value)]
     return []
 
-def models_inventory_core():
-    global MODEL_CACHE
+def models_inventory_core(force=False):
+    global MODEL_CACHE, MODEL_CACHE_AT
+    if not force and MODEL_CACHE is not None and (time.monotonic() - MODEL_CACHE_AT) < MODEL_CACHE_TTL:
+        return MODEL_CACHE
     status = openclaw_json(["models", "status", "--json"])
     catalog = openclaw_json(["models", "list", "--all", "--json"])
     primary_ref = nested_model_value(status)
@@ -500,6 +505,7 @@ def models_inventory_core():
     available = [row for row in available if model_key(row["id"]) not in selected]
     snapshot = {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     MODEL_CACHE = snapshot
+    MODEL_CACHE_AT = time.monotonic()
     return snapshot
 
 def models_inventory():
@@ -547,7 +553,7 @@ def apply_model_order(primary, fallbacks):
         subprocess.run(["openclaw", "models", "fallbacks", "add", ref], check=True, capture_output=True, text=True, timeout=90)
 
 def models_set_order():
-    global MODEL_CACHE
+    global MODEL_CACHE, MODEL_CACHE_AT
     primary = P.get("primary", "")
     fallbacks = P.get("fallbacks", [])
     if not valid_model_ref(primary) or not isinstance(fallbacks, list) or len(fallbacks) > 20:
@@ -574,6 +580,7 @@ def models_set_order():
             except Exception: pass
         fail("模型顺序保存失败，已尝试恢复旧顺序：" + redact_cli_error(error), "model_order_failed")
     MODEL_CACHE = snapshot_with_order(before, primary, fallbacks)
+    MODEL_CACHE_AT = time.monotonic()
     print(json.dumps(MODEL_CACHE, ensure_ascii=False, separators=(",", ":")))
 
 def models_add():
@@ -595,7 +602,8 @@ def models_add():
     if base_url:
         provider_entry = {"baseUrl": base_url, "api": "openai-completions", "models": [{"id": model_id, "name": display or model_id}]}
         openclaw_command(["config", "set", "models.providers." + provider, json.dumps(provider_entry, ensure_ascii=False, separators=(",", ":")), "--strict-json", "--merge"], timeout=90)
-    models_inventory()
+    # 配置已改变，不能返回旧清单。
+    print(json.dumps(models_inventory_core(force=True), ensure_ascii=False, separators=(",", ":")))
 
 def models_test_latency():
     models = P.get("models", [])
@@ -615,7 +623,8 @@ def models_test_latency():
                 return {"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "testedAtUtc": tested}
             return {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "testedAtUtc": tested}
         except subprocess.TimeoutExpired:
-            return {"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "testedAtUtc": tested}
+            # 超时模型在当前 future 完成后立即出队，不占用后续探测槽位。
+            return {"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时（超过 15 秒）", "timedOut": True, "testedAtUtc": tested}
         except FileNotFoundError:
             return {"modelId": ref, "success": False, "latencyMs": None, "error": "服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "fatalCode": "openclaw_missing", "testedAtUtc": tested}
         except Exception as error:
@@ -636,7 +645,11 @@ def models_test_latency():
             completed, _ = wait(active, return_when=FIRST_COMPLETED)
             for future in completed:
                 ref = active.pop(future)
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as error:
+                    # 单个探测异常不能阻塞队列；将它视为失败并继续补充下一个模型。
+                    result = {"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "testedAtUtc": tested}
                 fatal_code = fatal_code or result.pop("fatalCode", None)
                 results_by_id[ref] = result
                 next_ref = next(pending, None)
@@ -647,13 +660,18 @@ def models_test_latency():
     results = [results_by_id[ref] for ref in models]
     print(json.dumps({"ok": True, "testedAtUtc": tested, "results": results}, ensure_ascii=False, separators=(",", ":")))
 def handle(encoded):
-    global P, ROOTS
+    global P, ROOTS, MODEL_CACHE, MODEL_CACHE_AT, MODEL_CACHE_SCOPE
     try:
         P = json.loads(base64.b64decode(encoded).decode("utf-8"))
         ROOTS = {
             "workspace": os.path.realpath(P["workspace"]),
             "stickers": os.path.realpath(P["stickers"]),
         }
+        scope = (ROOTS["workspace"], ROOTS["stickers"])
+        if MODEL_CACHE_SCOPE != scope:
+            MODEL_CACHE = None
+            MODEL_CACHE_AT = 0.0
+            MODEL_CACHE_SCOPE = scope
         for root in ROOTS.values():
             if not os.path.isabs(root) or not os.path.isdir(root):
                 fail("配置的远程目录不存在或不是目录", "bad_root")

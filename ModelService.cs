@@ -6,12 +6,16 @@ namespace OpenClawDebugger;
 /// <summary>模型页的校验、排序、延迟测试和添加模型业务。</summary>
 public sealed class ModelService : IDisposable
 {
+    private static readonly TimeSpan SnapshotCacheLifetime = TimeSpan.FromSeconds(30);
     private readonly IRemoteModelClient _remote;
     private readonly Func<ConnectionSettings> _settings;
     private readonly Func<bool> _isConnected;
     private readonly Action<bool> _setBusy;
     private readonly ModelLatencyStore _latencies;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _cacheGate = new();
+    private RemoteModelSnapshot? _cachedSnapshot;
+    private DateTimeOffset _cachedAtUtc;
     private bool _disposed;
 
     public ModelService(
@@ -31,7 +35,16 @@ public sealed class ModelService : IDisposable
     public async Task<object> GetAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken);
-        try { return ToResponse(_latencies.Apply(await _remote.GetSnapshotAsync(_settings(), cancellationToken))); }
+        try
+        {
+            var snapshot = GetCachedSnapshot();
+            if (snapshot is null)
+            {
+                snapshot = await _remote.GetSnapshotAsync(_settings(), cancellationToken);
+                CacheSnapshot(snapshot);
+            }
+            return ToResponse(_latencies.Apply(snapshot));
+        }
         finally { _setBusy(false); _gate.Release(); }
     }
 
@@ -42,6 +55,7 @@ public sealed class ModelService : IDisposable
         try
         {
             var snapshot = await _remote.SetOrderAsync(_settings(), primary, fallbacks, cancellationToken);
+            CacheSnapshot(snapshot);
             return ToResponse(_latencies.Apply(snapshot));
         }
         finally { _setBusy(false); _gate.Release(); }
@@ -56,6 +70,7 @@ public sealed class ModelService : IDisposable
             var results = await _remote.TestLatencyAsync(_settings(), models, cancellationToken);
             _latencies.Merge(results);
             var snapshot = _latencies.Apply(await _remote.GetSnapshotAsync(_settings(), cancellationToken));
+            CacheSnapshot(snapshot);
             return new
             {
                 snapshot.Primary,
@@ -75,6 +90,7 @@ public sealed class ModelService : IDisposable
         try
         {
             var snapshot = await _remote.AddModelAsync(_settings(), request, cancellationToken);
+            CacheSnapshot(snapshot);
             return ToResponse(_latencies.Apply(snapshot));
         }
         finally { _setBusy(false); _gate.Release(); }
@@ -98,6 +114,35 @@ public sealed class ModelService : IDisposable
         {
             _gate.Release();
             throw;
+        }
+    }
+
+    private RemoteModelSnapshot? GetCachedSnapshot()
+    {
+        lock (_cacheGate)
+        {
+            if (_cachedSnapshot is null || DateTimeOffset.UtcNow - _cachedAtUtc >= SnapshotCacheLifetime)
+                return null;
+            return _cachedSnapshot;
+        }
+    }
+
+    private void CacheSnapshot(RemoteModelSnapshot snapshot)
+    {
+        lock (_cacheGate)
+        {
+            _cachedSnapshot = snapshot;
+            _cachedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
+    /// <summary>连接切换或服务器配置发生变化时清除本地模型清单缓存。</summary>
+    public void ResetCache()
+    {
+        lock (_cacheGate)
+        {
+            _cachedSnapshot = null;
+            _cachedAtUtc = default;
         }
     }
 
@@ -183,6 +228,7 @@ public sealed class ModelService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        ResetCache();
         // SemaphoreSlim has no unmanaged state. Keep it alive so an operation
         // cancelled during window shutdown can still release the gate safely.
     }
