@@ -124,7 +124,7 @@ public sealed class OperationLogStore
     {
         if (string.IsNullOrWhiteSpace(value)) return value ?? "";
         var text = value;
-        text = Regex.Replace(text, @"(?i)(password|passwd|secret|token|private.?key|contentBase64|expectedSha256)\s*[:=]\s*[^\s,;]+", "$1=<redacted>");
+        text = Regex.Replace(text, @"(?i)(password|passwd|secret|token|private.?key|api.?key|authorization|credential|contentBase64|expectedSha256)\s*[:=]\s*[^\s,;]+", "$1=<redacted>");
         text = Regex.Replace(text, @"[A-Za-z]:\\[^\r\n""']+", "<path>");
         text = Regex.Replace(text, @"(?<![A-Za-z0-9])/(?:[^\s""']+/){1,}[^\s""']*", "<path>");
         text = Regex.Replace(text, @"(?i)(OpenClaw-Debugger-Private|OpenClaw-Server-Backup|UploadStaging|ThumbnailCache|Rollback|Exports|Secrets)", "<private>");

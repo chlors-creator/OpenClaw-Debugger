@@ -30,6 +30,7 @@ public sealed class ConnectionCoordinator : IDisposable
 
     public MemoryService? Memory { get; private set; }
     public StickerService? Stickers { get; private set; }
+    public ModelService? Models { get; private set; }
     public BackupCoordinator? Backup { get; private set; }
     public IReadOnlyList<RemoteFile> Files { get; private set; } = [];
     public bool IsConnected { get; private set; }
@@ -60,6 +61,12 @@ public sealed class ConnectionCoordinator : IDisposable
             () => IsConnected,
             _isBusy,
             value => IsConnected = value,
+            _setBusy);
+        Models = new ModelService(
+            new RemoteModelClient(_remote),
+            () => settings.Connection,
+            () => IsConnected,
+            settings.PrivateDirectory,
             _setBusy);
         Backup = new BackupCoordinator(
             _snapshotClient,
@@ -126,6 +133,7 @@ public sealed class ConnectionCoordinator : IDisposable
         if (_disposed) return;
         _disposed = true;
         Backup?.Dispose();
+        Models?.Dispose();
         Stickers?.Dispose();
         _snapshotClient.Dispose();
         _remote.Dispose();

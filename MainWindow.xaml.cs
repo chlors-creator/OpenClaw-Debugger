@@ -91,7 +91,7 @@ public partial class MainWindow : Window
             throw new InvalidOperationException("当前有操作正在进行，请等待完成或先取消当前操作。");
 
         var router = _commandRouter ?? throw new InvalidOperationException("界面命令路由器未初始化。");
-        var serialized = domain is "connection" or "read" or "edit" or "backup" ||
+        var serialized = domain is "connection" or "read" or "edit" or "backup" or "model" ||
             definition.Mode == "uploadFinalize";
         if (!serialized)
             return await router.DispatchAsync(command, payload, cancellationToken);
@@ -119,6 +119,7 @@ public partial class MainWindow : Window
         ConnectAsync).Register(router);
         new MemoryBridgeHandler(() => _connection.Memory).Register(router);
         new StickerBridgeHandler(() => _connection.Stickers).Register(router);
+        new ModelBridgeHandler(() => _connection.Models).Register(router);
         new BackupBridgeHandler(() => _connection.Backup, () => _settings.Connection, OpenFolder).Register(router);
         new WindowBridgeHandler(
             () => _settings.PrivateDirectory,

@@ -12,11 +12,13 @@
   <script src="sticker-cache.js" defer></script>
   <script src="connection-state.js" defer></script>
   <script src="memory-state.js" defer></script>
+  <script src="model-state.js" defer></script>
   <script src="sticker-state.js" defer></script>
   <script src="backup-state.js" defer></script>
   <script src="settings-state.js" defer></script>
   <script src="app-state.js" defer></script>
   <script src="memory-controller.js" defer></script>
+  <script src="model-controller.js" defer></script>
   <script src="sticker-controller.js" defer></script>
   <script src="upload-controller.js" defer></script>
   <script src="backup-controller.js" defer></script>
@@ -41,6 +43,7 @@
       <div class="nav-tabs">
         <button class="nav-tab active" data-tab="overview"><span class="nav-shape"></span><span class="nav-label">概览</span></button>
         <button class="nav-tab" data-tab="memory"><span class="nav-shape"></span><span class="nav-label">记忆</span></button>
+        <button class="nav-tab" data-tab="models"><span class="nav-shape"></span><span class="nav-label">模型</span></button>
         <button class="nav-tab" data-tab="stickers"><span class="nav-shape"></span><span class="nav-label">表情包</span></button>
         <button class="nav-tab" data-tab="themes"><span class="nav-shape"></span><span class="nav-label">主题</span></button>
         <button class="nav-tab" data-tab="settings"><span class="nav-shape"></span><span class="nav-label">设置</span></button>
@@ -84,6 +87,16 @@
         </div>
       </section>
 
+      <section class="page" id="page-models">
+        <div class="section-heading model-section-heading"><div><div class="eyebrow">MODEL ROUTING</div><h2>模型选择</h2><p>查看当前模型和备选模型。拖动列表即可立即保存新的选择顺序。</p></div><div class="button-row model-heading-actions"><button class="button button-quiet" id="testModelLatencyButton" disabled>◌ <span>测试延迟</span></button><button class="button button-primary" id="addModelButton" disabled>＋ <span>添加新模型</span></button></div></div>
+        <div class="model-status-ribbon panel glass"><span class="model-status-orb">◈</span><div><strong id="modelLatencyStatus">连接服务器后读取模型配置。</strong><small id="modelRetrievedAt">尚未读取</small></div><span class="model-order-count" id="modelOrderCount">未配置</span></div>
+        <div class="model-layout">
+          <article class="panel glass model-current-panel"><div class="panel-heading"><div><div class="eyebrow">CURRENT MODEL</div><h3>当前已选</h3></div><span class="model-role-badge primary">PRIMARY</span></div><div class="model-current-card"><div class="model-provider-mark" id="modelCurrentProvider">—</div><div class="model-current-copy"><strong id="modelCurrentName">未读取</strong><small id="modelCurrentRef">连接服务器后读取模型配置</small></div></div><div class="model-detail-grid"><span><small>状态</small><b id="modelCurrentStatus">—</b></span><span><small>上次延迟</small><b id="modelCurrentLatency">—</b></span><span><small>测试时间</small><b id="modelCurrentTested">尚未测试</b></span></div></article>
+          <article class="panel glass model-order-panel"><div class="panel-heading"><div><div class="eyebrow">FAILOVER ORDER</div><h3>备选模型顺序</h3></div><span class="muted small">拖动行首手柄排序</span></div><div id="modelOrderList" class="model-order-list empty-state">连接服务器后读取模型配置</div><div class="model-order-hint">第 1 位为当前模型，其余按从上到下的顺序作为故障转移模型。松开鼠标后自动写入服务器。</div></article>
+          <article class="panel glass model-available-panel"><div class="panel-heading"><div><div class="eyebrow">AVAILABLE CATALOG</div><h3>可用模型</h3></div><span class="muted small">已配置但未排入顺序</span></div><div id="modelAvailableList" class="model-available-list empty-state">连接服务器后读取模型目录</div></article>
+        </div>
+      </section>
+
       <section class="page" id="page-stickers">
         <div class="section-heading"><div><div class="eyebrow">STICKER LIBRARY</div><h2>表情包与标签</h2><p>支持 GIF 动图和标签编辑。权重默认 1；设为 0 可停用。她会先筛出语境合适的候选，再按权重占比随机选图。</p></div><div class="button-row"><button class="button button-quiet" id="rawStickerButton" disabled>高级编辑原始文件</button><button class="button button-primary" id="saveStickerButton" disabled>保存设置</button></div></div>
         <div class="upload-dropzone disabled" id="uploadDropzone" tabindex="0" role="region" aria-label="拖放或选择本地表情包上传">
@@ -122,6 +135,21 @@
           <p class="muted">文件名会同步更新到图片目录、catalog.json 和 MANIFEST.md；扩展名保持不变。</p>
           <label class="rename-field">新文件名<input id="renameInput" maxlength="180" autocomplete="off" spellcheck="false"></label>
           <div class="modal-actions"><button class="button button-quiet" id="renameCancelButton" type="button">取消</button><button class="button button-primary" id="renameConfirmButton" type="submit">保存名称</button></div>
+        </form>
+      </dialog>
+
+      <dialog class="modal model-add-modal" id="modelAddDialog">
+        <form id="modelAddForm">
+          <div class="modal-head"><div><div class="eyebrow">ADD MODEL ROUTE</div><h3>添加新模型</h3></div><button class="icon-button" id="modelAddCloseButton" type="button" aria-label="关闭">×</button></div>
+          <p class="muted">模型会登记到服务器的 OpenClaw 配置中；API 密钥只通过标准输入交给服务器端凭据命令，不会写入本地日志。</p>
+          <div class="model-add-grid">
+            <label>模型引用<input id="modelRefInput" required maxlength="240" placeholder="provider/model" autocomplete="off" spellcheck="false"></label>
+            <label>显示名称<input id="modelDisplayNameInput" maxlength="180" placeholder="可选，例如主力模型" autocomplete="off"></label>
+            <label>别名<input id="modelAliasInput" maxlength="80" placeholder="可选" autocomplete="off"></label>
+            <label>OpenAI 兼容 API 地址<input id="modelBaseUrlInput" maxlength="500" placeholder="可选，例如 https://api.example.com/v1" autocomplete="off"></label>
+            <label class="model-api-key-field">API 密钥<input id="modelApiKeyInput" type="password" maxlength="500" placeholder="可选；不会保存到本机" autocomplete="new-password"></label>
+          </div>
+          <div class="modal-actions"><button class="button button-quiet" id="modelAddCancelButton" type="button">取消</button><button class="button button-primary" id="modelAddConfirmButton" type="submit">添加模型</button></div>
         </form>
       </dialog>
 

@@ -22,6 +22,7 @@ sealed class TestSuite
         await RunAsync("桥接协议参数校验", BridgePayloadValidationAsync);
         await RunAsync("旧请求状态保护", StaleRequestGuardAsync);
         await RunAsync("结构化日志脱敏", StructuredLogAsync);
+        await RunAsync("模型拖拽自动保存", ModelAutoSaveContractAsync);
         Console.WriteLine($"通过 {_passed} 项，失败 {_failed} 项。" );
         if (_failed > 0) Environment.ExitCode = 1;
     }
@@ -147,6 +148,23 @@ sealed class TestSuite
         Assert(!text.Contains("secret", StringComparison.OrdinalIgnoreCase), "日志不应暴露敏感参数");
         Assert(!text.Contains("C:\\Users\\private", StringComparison.OrdinalIgnoreCase), "日志不应暴露本地路径");
         Delete(root);
+        return Task.CompletedTask;
+    }
+
+    private static Task ModelAutoSaveContractAsync()
+    {
+        var sourceRoot = FindSourceRoot();
+        var contract = BridgeCommandContract.Load(Path.Combine(sourceRoot, "WebUi", "bridge-contract.json"));
+        Assert(contract.Commands.ContainsKey("getModels"), "协议应包含模型读取命令");
+        Assert(contract.Commands.ContainsKey("setModelOrder"), "协议应包含模型顺序命令");
+        Assert(contract.Commands.ContainsKey("testModelLatency"), "协议应包含延迟测试命令");
+        Assert(contract.Commands.ContainsKey("addModel"), "协议应包含添加模型命令");
+        var html = File.ReadAllText(Path.Combine(sourceRoot, "WebUi", "index.html"));
+        var controller = File.ReadAllText(Path.Combine(sourceRoot, "WebUi", "model-controller.js"));
+        Assert(html.IndexOf("data-tab=\"models\"", StringComparison.Ordinal) < html.IndexOf("data-tab=\"stickers\"", StringComparison.Ordinal), "模型导航应位于表情包之前");
+        Assert(controller.Contains("bridgeCall('setModelOrder'", StringComparison.Ordinal), "拖拽后应直接调用自动保存命令");
+        Assert(!html.Contains("saveModelOrderButton", StringComparison.Ordinal), "模型页不应有保存顺序按钮");
+        Assert(File.ReadAllText(Path.Combine(sourceRoot, "RemoteAgentProgram.cs")).Contains("models_set_order", StringComparison.Ordinal), "服务器代理应实现模型顺序写入");
         return Task.CompletedTask;
     }
 

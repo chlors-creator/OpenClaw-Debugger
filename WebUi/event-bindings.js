@@ -5,6 +5,7 @@
       $, $$, appState, switchTab, connectServer, toggleBackupPause, cancelBackup,
       saveConnectionSettings, bridgeCall, reportError, setStatus, setDirtyState, saveMemory,
       renderMemoryList, renderStickerList, saveStickerRows, openRawEditor,
+      testModelLatency, openAddModelDialog, submitAddModel,
       resetThemePalette, uploadFiles, cancelUpload, openRenameDialog, submitStickerRename,
       loadStickerThumbnail, hasDraggedFiles, getDroppedFiles, saveRawEditor,
       setBackdropValue, resetBackdrop, showToast, persistTheme
@@ -28,6 +29,11 @@
         await bridgeCall('openPrivateFolder', {});
       } catch (error) { reportError(error); }
     });
+    $('#testModelLatencyButton').addEventListener('click', testModelLatency);
+    $('#addModelButton').addEventListener('click', openAddModelDialog);
+    $('#modelAddCancelButton').addEventListener('click', () => $('#modelAddDialog').close());
+    $('#modelAddCloseButton').addEventListener('click', () => $('#modelAddDialog').close());
+    $('#modelAddForm').addEventListener('submit', event => { event.preventDefault(); submitAddModel(); });
     $('#editMemoryButton').addEventListener('click', () => {
       if (!appState.currentMemory) return;
       appState.memoryEditing = true; $('#memoryEditor').readOnly = false;
@@ -104,6 +110,10 @@
       appState.sticker.rawSaveController?.abort();
       appState.sticker.uploadController?.abort();
       appState.upload?.controller?.abort();
+      appState.model.loadController?.abort();
+      appState.model.testController?.abort();
+      appState.model.orderController?.abort();
+      appState.model.addController?.abort();
       appState.backup.controller?.abort();
       appState.bridge?.cancelAll();
       if (appState.dirtyMemory || appState.dirtyStickers || appState.dirtyRaw) { event.preventDefault(); event.returnValue = ''; }

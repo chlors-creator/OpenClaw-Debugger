@@ -18,6 +18,12 @@ public sealed partial class RemoteOpenClawClient : IDisposable
 
     // The SSH session sends requests to RemoteAgentProgram.Main.
 
+    internal Task<JsonObject> InvokeModelAsync(
+        ConnectionSettings settings,
+        JsonObject request,
+        CancellationToken cancellationToken = default) =>
+        _session.InvokeAsync(settings, request, cancellationToken);
+
 
     public async Task<IReadOnlyList<RemoteFile>> ConnectAndListAsync(
         ConnectionSettings settings, CancellationToken cancellationToken = default)

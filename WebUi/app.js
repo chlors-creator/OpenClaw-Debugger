@@ -38,6 +38,10 @@
     cancelButton.innerHTML = '✕ <span>取消备份</span>';
   }
 
+  function syncModelButtons() {
+    appState.modelController?.syncButtons();
+  }
+
   function setBusy(busy) {
     const busyNow = Boolean(busy || appState.uploadInProgress || appState.renameInProgress);
     const connected = $('.connection-chip').classList.contains('connected');
@@ -59,6 +63,7 @@
     $('#pickStickerButton').disabled = !uploadReady || uploadActive;
     $('#uploadDropzone').classList.toggle('disabled', !uploadReady);
     syncRenameButton();
+    syncModelButtons();
   }
 
   function setStatus(text, isError) {
@@ -109,6 +114,7 @@
     const activeButton = $('.nav-tab.active');
     const nav = $('.main-nav');
     if (activeButton) nav.style.setProperty('--active-x', activeButton.offsetLeft + 'px');
+    if (name === 'models' && $('.connection-chip').classList.contains('connected')) appState.modelController?.load();
   }
 
   function setDirtyState() {
@@ -147,6 +153,11 @@
   function getDroppedFiles(dataTransfer) { return appState.uploadController ? appState.uploadController.getDroppedFiles(dataTransfer) : []; }
   function uploadFiles(fileList) { return appState.uploadController && appState.uploadController.uploadFiles(fileList); }
   function cancelUpload() { return appState.uploadController && appState.uploadController.cancelUpload(); }
+
+  function loadModels() { return appState.modelController && appState.modelController.load(); }
+  function testModelLatency() { return appState.modelController && appState.modelController.testLatency(); }
+  function openAddModelDialog() { return appState.modelController && appState.modelController.openAddDialog(); }
+  function submitAddModel() { return appState.modelController && appState.modelController.submitAdd(); }
 
   function renderBackupProgress(data) { return appState.backupController && appState.backupController.renderProgress(data); }
   function backupServer() { return appState.backupController && appState.backupController.backup(); }
@@ -197,6 +208,7 @@
       clearStickerImageCache();
       appState.memoryFiles = result.memoryFiles || [];
       appState.stickerRows = result.stickerFiles || [];
+      appState.modelController?.reset();
       appState.originalStickerRows = snapshotStickerRows();
       appState.stickerEditingEnabled = Boolean(result.stickerEditingEnabled);
       appState.originalCatalog = result.catalogText || '';
@@ -215,12 +227,14 @@
       $('#refreshButton').disabled = false; $('#backupButton').disabled = false;
       setBusy(false);
       renderMemoryList(); renderStickerList(); setDirtyState();
+      loadModels();
       setStatus('SSH 连接成功，已读取 ' + result.memoryCount + ' 个记忆文档和 ' + result.stickerCount + ' 张图片。');
       showToast('服务器连接成功。');
     } catch (error) {
       if (controller.signal.aborted || (error && error.name === 'AbortError')) return;
       $('#connectionStatus').textContent = '连接失败';
       $('.connection-chip').classList.remove('connected');
+      appState.modelController?.reset();
       $('#backupButton').disabled = true; reportError(error);
     } finally {
       if (generation === appState.connection.connectGeneration) {
@@ -289,6 +303,10 @@
       $, bridgeCall, state: appState.memory, sizeLabel, setDirtyState, setStatus, showToast, reportError,
       getThumbnailObserver: () => appState.stickerThumbnailObserver, review
     });
+    appState.modelController = window.OpenClawModelController.create({
+      $, bridgeCall, state: appState.model, setStatus, showToast, reportError, setBusy,
+      isConnected: () => $('.connection-chip').classList.contains('connected')
+    });
     appState.stickerController = window.OpenClawStickerController.create({
       $, state: appState.sticker, sizeLabel, setDirtyState, setStatus, showToast, reportError, review,
       bridgeCall, setBusy, syncRenameButton, loadStickerImage, loadStickerThumbnail,
@@ -309,6 +327,7 @@
       $, $$, appState, switchTab, connectServer, toggleBackupPause, cancelBackup,
       saveConnectionSettings, bridgeCall, reportError, setStatus, setDirtyState, saveMemory,
       renderMemoryList, renderStickerList, saveStickerRows, openRawEditor,
+      testModelLatency, openAddModelDialog, submitAddModel,
       resetThemePalette, uploadFiles, cancelUpload, openRenameDialog, submitStickerRename,
       loadStickerThumbnail, hasDraggedFiles, getDroppedFiles, saveRawEditor,
       setBackdropValue, resetBackdrop, showToast, persistTheme

@@ -13,12 +13,14 @@
   function create() {
     const connection = window.OpenClawConnectionState.create();
     const memory = window.OpenClawMemoryState.create();
+    const model = window.OpenClawModelState.create();
     const sticker = window.OpenClawStickerState.create();
     const backup = window.OpenClawBackupState.create();
     const settings = window.OpenClawSettingsState.create();
     const state = {
       connection,
       memory,
+      model,
       sticker,
       backup,
       settings,
@@ -50,6 +52,7 @@
       themeController: null,
       stickerCacheController: null,
       memoryController: null,
+      modelController: null,
       stickerController: null,
       uploadController: null,
       backupController: null,

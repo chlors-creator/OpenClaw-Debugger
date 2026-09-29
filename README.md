@@ -6,6 +6,7 @@ OpenClaw Debugger 是一个运行在 Windows 上的本地桌面管理工具，�
 
 - 在桌面应用中连接 OpenClaw 服务器，查看工作区记忆 Markdown 和表情包目录。
 - 编辑记忆内容、表情包标签和权重，并安全上传、预览、重命名图片。
+- 查看当前模型、备选模型和上次延迟；拖拽模型列表后自动把新顺序写入服务器配置。
 - 管理主题和界面颜色，以及背景模糊、泛白和可见度。
 - 把服务器 `/` 归档为本机 tar.gz，并在私密目录生成校验清单。
 - 对远程路径和可执行操作设定明确边界；本项目不是通用 SSH 终端，也没有整机快照恢复界面。
@@ -35,6 +36,14 @@ OpenClaw Debugger 是一个运行在 Windows 上的本地桌面管理工具，�
 - 当前主题：`Atri`、`洛茜`、`浅色`。Atri 与洛茜使用项目内置背景图。
 - 主题页提供背景模糊程度、泛白程度、背景图可见度和 16 项界面颜色调整；颜色按主题保存在本机浏览器的 localStorage，主题名称由本机设置保存。
 - Atri 和洛茜背景资源位于 `Assets/Backgrounds/`，构建时复制到 Web UI 资源目录。
+
+### 模型
+
+- 导航顺序为“概览 → 记忆 → 模型 → 表情包 → 主题 → 设置”。模型页读取服务器 `openclaw models status/list --json` 的当前模型、备选模型和可用目录。
+- 当前模型和备选模型按一条有序列表显示；拖动行首手柄调整顺序，松开鼠标后立即调用服务器的 `openclaw models set` 与 `openclaw models fallbacks` 命令自动保存，不提供额外的“保存顺序”按钮。保存失败会恢复原顺序。
+- “测试延迟”逐个使用 `openclaw infer model run --local` 发送固定的最小探测请求，显示每个模型的毫秒耗时、失败状态和测试时间。测试结果只保存到私密目录的 `model-latency.json`，不保存响应内容或凭据。
+- “添加新模型”支持 `provider/model`、显示名、别名、OpenAI-compatible Base URL 和可选 API 密钥。API 密钥只通过服务器端 `openclaw models auth paste-api-key` 的标准输入处理，不进入本机日志；模型路由通过 `openclaw config set` 登记。
+- 模型管理使用 OpenClaw 官方 CLI 的模型配置入口；修改后由 OpenClaw 配置热加载，若服务器版本提示需要重启 Gateway，再按提示重启。
 
 ### 服务器归档备份
 
@@ -66,6 +75,8 @@ OpenClaw-Debugger/
 │   ├── theme.js           # 主题、调色板和背景调节控制器
 │   ├── sticker-cache.js    # 原图/缩略图缓存控制器
 │   ├── memory-controller.js # 记忆列表、预览和保存控制器
+│   ├── model-state.js       # 模型页状态和请求代际
+│   ├── model-controller.js  # 模型列表、拖拽自动保存、延迟测试和添加模型
 │   ├── sticker-controller.js # 表情包目录、预览、标签和重命名控制器
 │   ├── upload-controller.js # 本地拖放、分块上传和目录登记控制器
 │   ├── backup-controller.js # 备份进度、暂停、继续和取消控制器
@@ -102,6 +113,7 @@ OpenClaw-Debugger/
 ├── RemoteStickerStreamUploader.cs # 低内存流式图片上传
 ├── RemoteFileClient.cs    # 文件域客户端适配器
 ├── RemoteStickerClient.cs # 表情包域客户端适配器
+├── RemoteModelClient.cs   # 模型域客户端适配器和数据模型
 ├── RemoteAgentProgram.cs  # 独立维护的服务器端 Python 代理
 ├── SshCommandRunner.cs    # OpenSSH 参数、校验和错误分类
 ├── RemoteSnapshotClient.cs # 快照域客户端门面
@@ -112,6 +124,9 @@ OpenClaw-Debugger/
 ├── StickerService.cs      # 表情包目录、标签、重命名和上传业务
 ├── StickerUploadService.cs # 分块上传会话和本地临时文件
 ├── StickerThumbnailCache.cs # 缩略图生成、持久化和容量清理
+├── ModelService.cs        # 模型排序、延迟测试和添加模型业务
+├── ModelLatencyStore.cs   # 私密目录中的模型延迟记录
+├── ModelBridgeHandler.cs  # 模型桥接命令处理器
 ├── ParsedStickerCatalog.cs # 解析后的目录编辑模型
 ├── StickerCatalogEditor.cs # 表情包目录格式识别和 JSON 编辑
 ├── StickerManifestSynchronizer.cs # MANIFEST.md 表格同步
@@ -137,6 +152,7 @@ OpenClaw-Debugger/
 ├── Logs\                     # 按天保存的结构化 JSONL 操作日志
 ├── UploadStaging\            # 分块上传临时文件，提交或取消后删除
 ├── ThumbnailCache\           # 固定尺寸缩略图持久化缓存
+├── model-latency.json        # 模型延迟结果，不含凭据和响应内容
 └── OpenClaw-Server-Backup\   # 整机 tar.gz 和快照清单
 ```
 
@@ -153,12 +169,14 @@ OpenClaw-Debugger/
 - `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
 - `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责快照域接口。
 - `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界；`RemoteOpenClawClient.cs` 只保留领域门面，`RemoteAgentSession.cs` 管理复用 SSH 会话，`RemoteStickerStreamUploader.cs` 管理低内存流式上传，`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
+- `RemoteModelClient.cs` 是模型远程域边界；模型读写通过服务器上受限的 OpenClaw CLI 完成，不在客户端复制配置格式。`ModelService.cs` 校验模型引用、保存延迟记录并串行化排序、测试和添加操作。
 - `WebUi/app.js` 只负责编排和生命周期；`app-state.js` 管理跨控制器共享状态，`event-bindings.js` 管理 DOM、拖放和窗口事件，`memory-controller.js`、`sticker-controller.js`、`upload-controller.js`、`backup-controller.js`、`settings-controller.js` 各自维护对应功能；`bridge.js`、`theme.js`、`sticker-cache.js` 维护桥接、主题和缓存状态，样式覆盖集中在 `styles-overrides.css`。
-- `app-state.js` 只组合五个领域状态模块；连接、记忆读取、图片预览、重命名、标签保存和备份均带代际检查或 `AbortController`，旧请求返回后不会覆盖当前页面。
+- `app-state.js` 只组合六个领域状态模块；连接、记忆读取、模型列表/延迟测试、图片预览、重命名、标签保存和备份均带代际检查或 `AbortController`，旧请求返回后不会覆盖当前页面。
 - 表情包上传按 `Blob.slice()` 逐块读取浏览器文件，每块计算 SHA-256，失败块最多自动重试 3 次；后端按偏移和校验值接收，并对重复提交的同一分块幂等返回，浏览器不会再一次性读取整张图片。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
 - `OperationLogStore.cs` 记录操作 ID、开始时间、阶段、耗时、重试次数和 SSH 失败原因；日志正文会自动隐藏本地路径、私密目录和敏感参数。设置页的“导出操作日志”会把合并后的 JSONL 写入 `Exports` 并打开私密目录。
+- 模型 API 密钥不会写入 `model-latency.json`、操作日志或仓库；模型桥接操作只记录命令生命周期，不记录请求载荷。
 
 ## P1 / P2 拆分完成情况
 
@@ -190,6 +208,7 @@ OpenClaw-Debugger/
 - 本地备份执行磁盘空间预检、gzip 完整性验证、归档和清单原子提交、保留数量清理，以及启动时残留 `.staging-*` 清理。
 - `OperationLogStore` 以 JSONL 保存操作生命周期和 SSH 失败原因，统一脱敏并支持从设置页一键导出。
 - `OpenClawDebugger.Tests.csproj` 是无第三方测试依赖的运行器，用来验证备份控制和重试、上传分块幂等性、标签写入前置保护、协议校验、旧请求保护和日志脱敏。
+- 模型页面的桥接命令、模型引用校验、拖拽自动保存和延迟结果脱敏应在连接到测试服务器后做一次端到端检查；本地测试运行器不调用真实模型 API。
 
 ## 运行与构建
 

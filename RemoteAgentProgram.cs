@@ -4,7 +4,7 @@ namespace OpenClawDebugger;
 internal static class RemoteAgentProgram
 {
     public const string Main = """
-import base64, hashlib, json, os, stat, sys, tempfile, time
+import base64, hashlib, json, os, re, stat, subprocess, sys, tempfile, time
 from pathlib import PurePosixPath
 
 P = {}
@@ -348,6 +348,224 @@ def rename_image():
     except Exception:
         pass
     print(json.dumps({"ok": True, "relativePath": new_name, "size": len(source_data), "sha256": source_hash}, separators=(",", ":")))
+
+def redact_cli_error(value):
+    text = str(value or "")
+    text = re.sub(r"(?i)(api[_-]?key|token|secret|password|authorization)\s*[:=]\s*[^\s,;]+", r"\1=<redacted>", text)
+    text = re.sub(r"(?i)(/home/[^\s]+|/root/[^\s]+|[A-Za-z]:\\[^\s]+)", "<path>", text)
+    return text[-1200:] if len(text) > 1200 else text
+
+def openclaw_json(args, input_text=None, timeout=90):
+    command = ["openclaw"] + list(args)
+    try:
+        completed = subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=os.environ.copy()
+        )
+    except FileNotFoundError:
+        fail("服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "openclaw_missing")
+    except subprocess.TimeoutExpired:
+        fail("OpenClaw 模型操作超时", "openclaw_timeout")
+    stdout = (completed.stdout or "").strip()
+    stderr = redact_cli_error(completed.stderr or "")
+    if completed.returncode != 0:
+        fail("OpenClaw 命令失败" + ((": " + stderr) if stderr else ""), "openclaw_command")
+    candidates = [stdout]
+    candidates.extend(line.strip() for line in reversed(stdout.splitlines()) if line.strip())
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            pass
+    fail("OpenClaw 没有返回可识别的 JSON", "openclaw_invalid_json")
+
+def openclaw_command(args, input_text=None, timeout=90):
+    try:
+        completed = subprocess.run(["openclaw"] + list(args), input=input_text, text=True, capture_output=True, timeout=timeout, env=os.environ.copy())
+    except FileNotFoundError:
+        fail("服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "openclaw_missing")
+    except subprocess.TimeoutExpired:
+        fail("OpenClaw 模型操作超时", "openclaw_timeout")
+    if completed.returncode != 0:
+        detail = redact_cli_error(completed.stderr or completed.stdout or "")
+        fail("OpenClaw 命令失败" + ((": " + detail) if detail else ""), "openclaw_command")
+    return completed.stdout or ""
+
+def model_ref(value):
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("id", "model", "ref", "key", "name", "primary", "resolved"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return ""
+
+def valid_model_ref(value):
+    return isinstance(value, str) and 3 <= len(value) <= 240 and "/" in value and not any(ch.isspace() or ord(ch) < 32 for ch in value)
+
+def model_provider(value):
+    return value.split("/", 1)[0] if "/" in value else ""
+
+def model_row(value, selected=False):
+    ref = model_ref(value)
+    if not valid_model_ref(ref):
+        return None
+    if isinstance(value, dict):
+        name = str(value.get("name") or value.get("displayName") or ref)
+        provider = str(value.get("provider") or model_provider(ref))
+        status = str(value.get("status") or value.get("authStatus") or "unknown")
+        alias = value.get("alias") if isinstance(value.get("alias"), str) else None
+    else:
+        name, provider, status, alias = ref, model_provider(ref), "unknown", None
+    return {"id": ref, "name": name, "provider": provider, "status": status, "alias": alias}
+
+def nested_model_value(status):
+    if not isinstance(status, dict):
+        return None
+    for key in ("resolvedDefault", "primary", "defaultModel", "model"):
+        value = status.get(key)
+        ref = model_ref(value)
+        if valid_model_ref(ref):
+            return ref
+    config = status.get("config")
+    if isinstance(config, dict):
+        agents = config.get("agents")
+        defaults = agents.get("defaults") if isinstance(agents, dict) else None
+        model = defaults.get("model") if isinstance(defaults, dict) else None
+        if isinstance(model, dict):
+            ref = model_ref(model.get("primary"))
+        else:
+            ref = model_ref(model)
+        if valid_model_ref(ref):
+            return ref
+    return None
+
+def configured_fallbacks(status):
+    if not isinstance(status, dict):
+        return []
+    holders = [status.get("fallbacks"), status.get("model")]
+    config = status.get("config")
+    if isinstance(config, dict):
+        agents = config.get("agents")
+        defaults = agents.get("defaults") if isinstance(agents, dict) else None
+        holders.append(defaults.get("model") if isinstance(defaults, dict) else None)
+    for holder in holders:
+        if isinstance(holder, dict): holder = holder.get("fallbacks")
+        if isinstance(holder, list):
+            values = [model_ref(item) for item in holder]
+            return [value for value in values if valid_model_ref(value)]
+    return []
+
+def models_inventory_core():
+    status = openclaw_json(["models", "status", "--json"])
+    catalog = openclaw_json(["models", "list", "--all", "--json"])
+    primary_ref = nested_model_value(status)
+    fallback_refs = configured_fallbacks(status)
+    catalog_values = catalog.get("models") or catalog.get("items") or catalog.get("data") or []
+    if isinstance(catalog_values, dict): catalog_values = list(catalog_values.values())
+    available = []
+    by_id = {}
+    for value in catalog_values if isinstance(catalog_values, list) else []:
+        row = model_row(value)
+        if row and row["id"] not in by_id:
+            by_id[row["id"]] = row
+            available.append(row)
+    for ref in [primary_ref] + fallback_refs:
+        if ref and ref not in by_id:
+            row = model_row(ref)
+            if row:
+                by_id[ref] = row
+                available.append(row)
+    primary = by_id.get(primary_ref) if primary_ref else None
+    fallbacks = [by_id[ref] for ref in fallback_refs if ref in by_id and ref != primary_ref]
+    selected = {row["id"] for row in fallbacks}
+    if primary: selected.add(primary["id"])
+    available = [row for row in available if row["id"] not in selected]
+    return {"ok": True, "primary": primary, "fallbacks": fallbacks, "available": available, "retrievedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+def models_inventory():
+    print(json.dumps(models_inventory_core(), ensure_ascii=False, separators=(",", ":")))
+
+def apply_model_order(primary, fallbacks):
+    subprocess.run(["openclaw", "models", "set", primary], check=True, capture_output=True, text=True, timeout=90)
+    subprocess.run(["openclaw", "models", "fallbacks", "clear"], check=True, capture_output=True, text=True, timeout=90)
+    for ref in fallbacks:
+        subprocess.run(["openclaw", "models", "fallbacks", "add", ref], check=True, capture_output=True, text=True, timeout=90)
+
+def models_set_order():
+    primary = P.get("primary", "")
+    fallbacks = P.get("fallbacks", [])
+    if not valid_model_ref(primary) or not isinstance(fallbacks, list) or len(fallbacks) > 20:
+        fail("模型顺序参数无效", "bad_model_order")
+    fallbacks = [item.strip() if isinstance(item, str) else "" for item in fallbacks]
+    if any(not valid_model_ref(item) for item in fallbacks) or len(set(fallbacks)) != len(fallbacks) or primary in fallbacks:
+        fail("模型顺序包含无效或重复项目", "bad_model_order")
+    before = models_inventory_core()
+    old_primary = before.get("primary", {}).get("id") if before.get("primary") else ""
+    old_fallbacks = [item.get("id") for item in before.get("fallbacks", [])]
+    try:
+        apply_model_order(primary, fallbacks)
+    except Exception as error:
+        if valid_model_ref(old_primary):
+            try: apply_model_order(old_primary, [item for item in old_fallbacks if item != old_primary])
+            except Exception: pass
+        fail("模型顺序保存失败，已尝试恢复旧顺序：" + redact_cli_error(error), "model_order_failed")
+    models_inventory()
+
+def models_add():
+    ref = P.get("modelRef", "").strip() if isinstance(P.get("modelRef"), str) else ""
+    alias = P.get("alias", "").strip() if isinstance(P.get("alias"), str) else ""
+    display = P.get("displayName", "").strip() if isinstance(P.get("displayName"), str) else ""
+    base_url = P.get("baseUrl", "").strip() if isinstance(P.get("baseUrl"), str) else ""
+    api_key = P.get("apiKey", "") if isinstance(P.get("apiKey"), str) else ""
+    if not valid_model_ref(ref): fail("模型引用需要使用 provider/model 格式", "bad_model")
+    provider, model_id = ref.split("/", 1)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", provider): fail("模型提供商名称无效", "bad_model")
+    if alias and (len(alias) > 80 or any(ord(ch) < 32 for ch in alias)): fail("模型别名无效", "bad_model")
+    if display and (len(display) > 180 or any(ord(ch) < 32 for ch in display)): fail("模型显示名无效", "bad_model")
+    if base_url and not re.match(r"^https?://", base_url, re.I): fail("API 地址必须是 http 或 https URL", "bad_model")
+    if api_key:
+        openclaw_command(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", provider + ":manual"], api_key + "\n", 90)
+    entry = {ref: ({"alias": alias} if alias else {})}
+    openclaw_command(["config", "set", "agents.defaults.models", json.dumps(entry, ensure_ascii=False, separators=(",", ":")), "--strict-json", "--merge"], timeout=90)
+    if base_url:
+        provider_entry = {"baseUrl": base_url, "api": "openai-completions", "models": [{"id": model_id, "name": display or model_id}]}
+        openclaw_command(["config", "set", "models.providers." + provider, json.dumps(provider_entry, ensure_ascii=False, separators=(",", ":")), "--strict-json", "--merge"], timeout=90)
+    models_inventory()
+
+def models_test_latency():
+    models = P.get("models", [])
+    if not isinstance(models, list) or not 1 <= len(models) <= 20:
+        fail("测试模型列表无效", "bad_model_test")
+    models = [item.strip() if isinstance(item, str) else "" for item in models]
+    if any(not valid_model_ref(item) for item in models): fail("测试模型引用无效", "bad_model_test")
+    tested = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    results = []
+    for ref in models:
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                ["openclaw", "infer", "model", "run", "--local", "--model", ref, "--prompt", "Reply with exactly: openclaw-debugger-latency", "--json"],
+                capture_output=True, text=True, timeout=45, env=os.environ.copy())
+            if completed.returncode == 0:
+                results.append({"modelId": ref, "success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "testedAtUtc": tested})
+            else:
+                results.append({"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(completed.stderr or completed.stdout or "模型探测失败"), "testedAtUtc": tested})
+        except subprocess.TimeoutExpired:
+            results.append({"modelId": ref, "success": False, "latencyMs": None, "error": "模型探测超时", "testedAtUtc": tested})
+        except FileNotFoundError:
+            fail("服务器找不到 openclaw 命令，请确认 OpenClaw 已安装", "openclaw_missing")
+        except Exception as error:
+            results.append({"modelId": ref, "success": False, "latencyMs": None, "error": redact_cli_error(error), "testedAtUtc": tested})
+    print(json.dumps({"ok": True, "testedAtUtc": tested, "results": results}, ensure_ascii=False, separators=(",", ":")))
+
 def handle(encoded):
     global P, ROOTS
     try:
@@ -372,6 +590,14 @@ def handle(encoded):
             upload_image()
         elif action == "rename":
             rename_image()
+        elif action == "models_inventory":
+            models_inventory()
+        elif action == "models_set_order":
+            models_set_order()
+        elif action == "models_add":
+            models_add()
+        elif action == "models_test_latency":
+            models_test_latency()
         else:
             fail("不支持的操作")
     except SystemExit:
