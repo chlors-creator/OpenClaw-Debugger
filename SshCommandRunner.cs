@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace OpenClawDebugger;
@@ -7,6 +8,70 @@ namespace OpenClawDebugger;
 /// <summary>集中管理 OpenSSH 参数、设置校验和错误分类。</summary>
 internal static class SshCommandRunner
 {
+    private static readonly string[] CommonExecutablePaths =
+    [
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OpenSSH", "ssh.exe"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Sysnative", "OpenSSH", "ssh.exe"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64", "OpenSSH", "ssh.exe"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "OpenSSH", "ssh.exe"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "usr", "bin", "ssh.exe"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "OpenSSH", "ssh.exe"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Git", "usr", "bin", "ssh.exe")
+    ];
+
+    /// <summary>
+    /// Resolve the Windows OpenSSH executable explicitly. A desktop shortcut can inherit a
+    /// reduced PATH, so relying on only "ssh.exe" makes a working system look unconfigured.
+    /// </summary>
+    internal static string ResolveExecutable()
+    {
+        var configured = Environment.GetEnvironmentVariable("OPENCLAW_SSH_PATH")?.Trim();
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured)) return configured;
+
+        foreach (var candidate in CommonExecutablePaths.Where(x => !string.IsNullOrWhiteSpace(x)))
+            if (File.Exists(candidate)) return candidate;
+
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                var candidate = Path.Combine(directory, "ssh.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
+            catch (ArgumentException) { }
+        }
+
+        var checkedPaths = CommonExecutablePaths.Where(x => !string.IsNullOrWhiteSpace(x));
+        throw new InvalidOperationException(
+            "找不到 Windows OpenSSH 客户端 ssh.exe。已检查系统 OpenSSH、Git OpenSSH 和当前 PATH；" +
+            "请安装 Windows OpenSSH Client，或设置 OPENCLAW_SSH_PATH 指向 ssh.exe。\n已检查：" +
+            string.Join("；", checkedPaths));
+    }
+
+    internal static void AddPythonBootstrapArgument(ProcessStartInfo start)
+    {
+        // Keep the SSH command short. The first stdin line carries the base64 script;
+        // the script then continues reading the JSON/binary protocol from the same stream.
+        start.ArgumentList.Add("python3 -u -c \"import sys,base64;exec(base64.b64decode(sys.stdin.readline()))\"");
+    }
+
+    internal static void WritePythonBootstrap(Stream input, string program)
+    {
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(program)) + "\n";
+        var bytes = System.Text.Encoding.ASCII.GetBytes(encoded);
+        input.Write(bytes, 0, bytes.Length);
+        input.Flush();
+    }
+
+    internal static async Task WritePythonBootstrapAsync(Stream input, string program, CancellationToken cancellationToken)
+    {
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(program)) + "\n";
+        var bytes = System.Text.Encoding.ASCII.GetBytes(encoded);
+        await input.WriteAsync(bytes, cancellationToken);
+        await input.FlushAsync(cancellationToken);
+    }
+
     internal static void AddSshArguments(ProcessStartInfo start, ConnectionSettings settings)
     {
         start.ArgumentList.Add("-T");

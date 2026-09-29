@@ -128,6 +128,30 @@ public sealed class ConnectionCoordinator : IDisposable
         finally { _connectGate.Release(); }
     }
 
+    public async Task<object> DisconnectAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _connectGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_isBusy()) throw new InvalidOperationException("当前有操作正在进行，请等待完成或先取消当前操作。" );
+            _setBusy(true);
+            try
+            {
+                IsConnected = false;
+                Files = [];
+                Memory?.Reset();
+                _remote.Disconnect();
+                return new { Connected = false };
+            }
+            finally
+            {
+                _setBusy(false);
+            }
+        }
+        finally { _connectGate.Release(); }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

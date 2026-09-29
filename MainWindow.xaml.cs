@@ -68,7 +68,9 @@ public partial class MainWindow : Window
             var uiDirectory = Path.Combine(AppContext.BaseDirectory, "WebUi");
             if (!Directory.Exists(uiDirectory)) throw new DirectoryNotFoundException("找不到 WebUi 界面资源目录：" + uiDirectory);
             core.SetVirtualHostNameToFolderMapping("openclaw.local", uiDirectory, CoreWebView2HostResourceAccessKind.DenyCors);
-            core.Navigate("https://openclaw.local/index.html");
+            // 每次启动使用新的查询版本，避免 WebView2 继续复用旧的 HTML/脚本缓存。
+            var cacheKey = File.GetLastWriteTimeUtc(typeof(MainWindow).Assembly.Location).Ticks;
+            core.Navigate("https://openclaw.local/index.html?v=" + cacheKey.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         catch (Exception ex)
         {
@@ -116,7 +118,8 @@ public partial class MainWindow : Window
             _settingsService,
             () => _settings,
             () => _connection.IsConnected,
-        ConnectAsync).Register(router);
+            ConnectAsync,
+            DisconnectAsync).Register(router);
         new MemoryBridgeHandler(() => _connection.Memory).Register(router);
         new StickerBridgeHandler(() => _connection.Stickers).Register(router);
         new ModelBridgeHandler(() => _connection.Models).Register(router);
@@ -145,6 +148,8 @@ public partial class MainWindow : Window
     }
 
     private Task<object> ConnectAsync(CancellationToken cancellationToken) => _connection.ConnectAsync(_settings, cancellationToken);
+
+    private Task<object> DisconnectAsync(CancellationToken cancellationToken) => _connection.DisconnectAsync(cancellationToken);
 
     private void SetBusy(bool busy)
     {

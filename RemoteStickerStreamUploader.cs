@@ -81,7 +81,7 @@ except Exception as error:
         if (size is < 1 or > 16 * 1024 * 1024) throw new InvalidDataException("图片为空或超过 16 MiB 限制。");
         var start = new ProcessStartInfo
         {
-            FileName = "ssh.exe",
+            FileName = SshCommandRunner.ResolveExecutable(),
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardInput = true,
@@ -92,8 +92,7 @@ except Exception as error:
             StandardErrorEncoding = new UTF8Encoding(false)
         };
         SshCommandRunner.AddSshArguments(start, settings);
-        var program64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(UploadStreamProgram));
-        start.ArgumentList.Add("python3 -u -c \"import base64;exec(base64.b64decode('" + program64 + "'))\"");
+        SshCommandRunner.AddPythonBootstrapArgument(start);
         using var process = new Process { StartInfo = start };
         try
         {
@@ -101,7 +100,7 @@ except Exception as error:
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
+            throw new InvalidOperationException($"无法启动 Windows OpenSSH：{start.FileName}\n{ex.Message}", ex);
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -109,6 +108,7 @@ except Exception as error:
         var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
         try
         {
+            await SshCommandRunner.WritePythonBootstrapAsync(process.StandardInput.BaseStream, UploadStreamProgram, timeout.Token);
             var header = JsonSerializer.Serialize(new { stickers = settings.StickersPath, filename = fileName, size }) + "\n";
             var headerBytes = Encoding.UTF8.GetBytes(header);
             await process.StandardInput.BaseStream.WriteAsync(headerBytes, timeout.Token);

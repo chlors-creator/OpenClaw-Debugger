@@ -64,7 +64,7 @@ internal sealed class RemoteAgentSession : IDisposable
         ResetSession();
         var start = new ProcessStartInfo
         {
-            FileName = "ssh.exe",
+            FileName = SshCommandRunner.ResolveExecutable(),
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardInput = true,
@@ -75,17 +75,17 @@ internal sealed class RemoteAgentSession : IDisposable
             StandardErrorEncoding = new UTF8Encoding(false)
         };
         SshCommandRunner.AddSshArguments(start, settings);
-        var program64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(RemoteAgentProgram.Main));
-        start.ArgumentList.Add("python3 -u -c \"import base64;exec(base64.b64decode('" + program64 + "'))\"");
+        SshCommandRunner.AddPythonBootstrapArgument(start);
         var process = new Process { StartInfo = start };
         try
         {
             if (!process.Start()) throw new InvalidOperationException("无法启动 Windows OpenSSH。");
+            SshCommandRunner.WritePythonBootstrap(process.StandardInput.BaseStream, RemoteAgentProgram.Main);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             process.Dispose();
-            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
+            throw new InvalidOperationException($"无法启动 Windows OpenSSH：{start.FileName}\n{ex.Message}", ex);
         }
         _ = process.StandardError.ReadToEndAsync();
         _sessionProcess = process;
@@ -102,6 +102,9 @@ internal sealed class RemoteAgentSession : IDisposable
         try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
         process.Dispose();
     }
+
+    /// <summary>主动关闭复用 SSH 进程，但保留会话对象以便之后重新连接。</summary>
+    public void Disconnect() => ResetSession();
 
     public void Dispose()
     {

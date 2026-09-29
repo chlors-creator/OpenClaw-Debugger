@@ -42,11 +42,42 @@
     appState.modelController?.syncButtons();
   }
 
+  function isConnected() {
+    return $('.connection-chip').classList.contains('connected');
+  }
+
+  function syncConnectionButton() {
+    const button = $('#connectButton');
+    if (!button) return;
+    const connected = isConnected();
+    const pending = appState.connecting || appState.connection.disconnecting;
+    const busy = Boolean(appState.connection.busy || appState.uploadInProgress || appState.renameInProgress);
+    const hoverDisconnect = connected && !pending && (button.matches(':hover') || button.matches(':focus-visible'));
+    const icon = appState.connection.disconnecting ? '…' : appState.connecting ? '◌' : connected ? '✓' : '⟷';
+    const label = appState.connection.disconnecting ? '正在断开' : appState.connecting ? '取消连接' : connected ? (hoverDisconnect ? '断开连接' : '已连接') : '连接服务器';
+    const signature = icon + '|' + label;
+    button.classList.toggle('connection-button-connected', connected);
+    button.classList.toggle('connection-button-pending', pending);
+    // 连接过程可以主动取消，避免网络波动时整个顶栏看起来像“没有反应”。
+    button.disabled = appState.connection.disconnecting || (busy && !appState.connecting);
+    button.setAttribute('aria-label', label);
+    button.title = connected && !pending ? '已连接；悬停后可断开连接' : label;
+    if (button.dataset.connectionSignature !== signature) {
+      button.innerHTML = icon + ' <span class="connection-button-label">' + label + '</span>';
+      button.dataset.connectionSignature = signature;
+    }
+  }
+
   function setBusy(busy) {
-    const busyNow = Boolean(busy || appState.uploadInProgress || appState.renameInProgress);
+    const busyNow = Boolean(
+      busy ||
+      appState.connection.disconnecting ||
+      appState.uploadInProgress ||
+      appState.renameInProgress
+    );
+    appState.connection.busy = busyNow;
     const connected = $('.connection-chip').classList.contains('connected');
     document.body.classList.toggle('busy', busyNow);
-    $('#connectButton').disabled = busyNow;
     $('#refreshButton').disabled = busyNow || !connected;
     if (appState.backupActive) {
       $('#backupButton').disabled = appState.backupCancelRequested;
@@ -64,6 +95,7 @@
     $('#uploadDropzone').classList.toggle('disabled', !uploadReady);
     syncRenameButton();
     syncModelButtons();
+    syncConnectionButton();
   }
 
   function setStatus(text, isError) {
@@ -84,6 +116,58 @@
     const message = error && error.message ? error.message : String(error);
     setStatus(message, true);
     showToast(message, true);
+  }
+
+  function resetDisconnectedUi() {
+    appState.memory.readController?.abort();
+    appState.memory.saveController?.abort();
+    appState.sticker.previewController?.abort();
+    appState.sticker.saveController?.abort();
+    appState.sticker.renameController?.abort();
+    appState.sticker.rawSaveController?.abort();
+    appState.memoryFiles = [];
+    appState.currentMemory = null;
+    appState.memoryOriginal = '';
+    appState.memoryEditing = false;
+    appState.dirtyMemory = false;
+    appState.stickerRows = [];
+    appState.originalStickerRows = [];
+    appState.currentSticker = null;
+    appState.originalCatalog = '';
+    appState.originalManifest = '';
+    appState.stickerEditingEnabled = false;
+    appState.dirtyStickers = false;
+    appState.dirtyRaw = false;
+    appState.modelController?.reset();
+    $('.connection-chip').classList.remove('connected');
+    $('#connectionStatus').textContent = '尚未连接';
+    $('#memoryCount').textContent = '—';
+    $('#stickerCount').textContent = '—';
+    $('#memoryPageCount').textContent = '0';
+    $('#stickerListCount').textContent = '0';
+    $('#memoryTitle').textContent = '选择左侧文件';
+    $('#memoryInfo').textContent = '内容会在读取后显示。';
+    $('#memoryEditor').value = '';
+    $('#memoryEditor').readOnly = true;
+    $('#memoryEditorState').textContent = '只读预览';
+    $('#cancelMemoryButton').disabled = true;
+    $('#rawStickerButton').disabled = true;
+    $('#saveStickerButton').disabled = true;
+    $('#stickerTitle').textContent = '选择一张贴图';
+    $('#stickerFormat').textContent = 'IMAGE';
+    $('#selectedTags').textContent = '选择图片后显示标签';
+    $('#stickerSize').textContent = '';
+    $('#stickerStatus').textContent = '连接后读取目录和标签格式。';
+    $('#stickerImage').hidden = true;
+    $('#stickerImage').removeAttribute('src');
+    $('.placeholder-art').hidden = false;
+    $('#rootPathsText').textContent = '连接后显示工作区和表情包目录';
+    $('#refreshButton').disabled = true;
+    $('#backupButton').disabled = true;
+    appState.memoryController?.renderList();
+    appState.stickerController?.renderList();
+    setDirtyState();
+    syncConnectionButton();
   }
 
   function sizeLabel(size) {
@@ -141,6 +225,7 @@
 
   function renderStickerList() { return appState.stickerController && appState.stickerController.renderList(); }
   function selectSticker(row) { return appState.stickerController && appState.stickerController.select(row); }
+  function saveStickerRows() { return appState.stickerController && appState.stickerController.save(); }
   function openRenameDialog() { return appState.stickerController && appState.stickerController.openRename(); }
   function submitStickerRename() { return appState.stickerController && appState.stickerController.submitRename(); }
   function rowsPayload() { return appState.stickerController ? appState.stickerController.rowsPayload() : []; }
@@ -184,7 +269,7 @@
   }
 
   async function connectServer() {
-    if (appState.connecting) return;
+    if (appState.connecting || appState.connection.disconnecting) return;
     if (appState.dirtyMemory || appState.dirtyStickers || appState.dirtyRaw) {
       showToast('请先保存或放弃未完成的修改，再重新扫描。', true);
       return;
@@ -197,6 +282,7 @@
     const controller = new AbortController();
     appState.connection.connectController = controller;
     appState.connecting = true;
+    syncConnectionButton();
     $('#connectionStatus').textContent = '正在连接';
     $('.connection-chip').classList.remove('connected');
     setStatus('正在连接服务器并扫描允许管理的目录…');
@@ -216,6 +302,7 @@
       appState.dirtyMemory = false; appState.dirtyStickers = false; appState.dirtyRaw = false; appState.currentMemory = null; appState.currentSticker = null;
       $('#connectionStatus').textContent = result.connectionStatus;
       $('.connection-chip').classList.add('connected');
+      syncConnectionButton();
       $('#memoryCount').textContent = result.memoryCount;
       $('#stickerCount').textContent = result.stickerCount;
       $('#memoryPageCount').textContent = result.memoryCount;
@@ -235,14 +322,74 @@
       $('#connectionStatus').textContent = '连接失败';
       $('.connection-chip').classList.remove('connected');
       appState.modelController?.reset();
-      $('#backupButton').disabled = true; reportError(error);
+      $('#backupButton').disabled = true;
+      syncConnectionButton();
+      reportError(error);
     } finally {
       if (generation === appState.connection.connectGeneration) {
         appState.connecting = false;
         if (appState.connection.connectController === controller) appState.connection.connectController = null;
         setBusy(false);
+        syncConnectionButton();
       }
     }
+  }
+
+  async function disconnectServer() {
+    if (appState.connection.disconnecting || !isConnected()) return;
+    if (appState.dirtyMemory || appState.dirtyStickers || appState.dirtyRaw) {
+      showToast('请先保存或放弃未完成的修改，再断开服务器。', true);
+      return;
+    }
+    if (appState.backupActive || appState.uploadInProgress || appState.renameInProgress) {
+      showToast('当前有远程操作正在进行，请完成或取消后再断开。', true);
+      return;
+    }
+    appState.connection.connectGeneration++;
+    appState.connection.connectController?.abort();
+    const generation = ++appState.connection.disconnectGeneration;
+    const controller = new AbortController();
+    appState.connection.disconnectController = controller;
+    appState.connection.disconnecting = true;
+    $('#connectionStatus').textContent = '正在断开';
+    setStatus('正在关闭 SSH 复用连接…');
+    syncConnectionButton();
+    setBusy(true);
+    try {
+      await bridgeCall('disconnect', {}, { signal: controller.signal });
+      if (generation !== appState.connection.disconnectGeneration || controller.signal.aborted) return;
+      resetDisconnectedUi();
+      setStatus('服务器连接已断开。');
+      showToast('已断开服务器连接。');
+    } catch (error) {
+      if (!controller.signal.aborted && !(error && error.name === 'AbortError')) reportError(error);
+    } finally {
+      if (generation === appState.connection.disconnectGeneration) {
+        appState.connection.disconnecting = false;
+        if (appState.connection.disconnectController === controller) appState.connection.disconnectController = null;
+        setBusy(false);
+        syncConnectionButton();
+      }
+    }
+  }
+
+  function cancelConnect() {
+    if (!appState.connecting) return;
+    appState.connection.connectGeneration++;
+    appState.connection.connectController?.abort();
+    appState.connection.connectController = null;
+    appState.connecting = false;
+    $('.connection-chip').classList.remove('connected');
+    $('#connectionStatus').textContent = '已取消连接';
+    setBusy(false);
+    syncConnectionButton();
+    setStatus('已取消服务器连接。');
+    showToast('已取消服务器连接。');
+  }
+
+  function toggleConnection() {
+    if (appState.connecting) return cancelConnect();
+    return isConnected() ? disconnectServer() : connectServer();
   }
 
   function openRawEditor() {
@@ -324,7 +471,7 @@
       $, bridgeCall, state: appState.settingsModel, setStatus, showToast, reportError, connectServer
     });
     appState.eventBindings = window.OpenClawEventBindings.create({
-      $, $$, appState, switchTab, connectServer, toggleBackupPause, cancelBackup,
+      $, $$, appState, switchTab, connectServer, toggleConnection, syncConnectionButton, toggleBackupPause, cancelBackup,
       saveConnectionSettings, bridgeCall, reportError, setStatus, setDirtyState, saveMemory,
       renderMemoryList, renderStickerList, saveStickerRows, openRawEditor,
       testModelLatency, openAddModelDialog, submitAddModel,
@@ -333,6 +480,7 @@
       setBackdropValue, resetBackdrop, showToast, persistTheme
     });
     appState.eventBindings.wireEvents(); initializeBackdrop();
+    let initialized = false;
     try {
       const state = await bridgeCall('initialize', {});
       fillSettings(state.settings.connection, state.settings.backupRetentionCount);
@@ -340,9 +488,28 @@
       $('#backupPath').textContent = state.backupDirectory;
       applyTheme(state.settings.themeName || 'Atri');
       setStatus('私密数据目录已就绪：' + state.privateDirectory);
+      initialized = true;
     } catch (error) { reportError(error); }
     setBusy(false);
+    syncConnectionButton();
+    if (initialized) await connectServer();
   }
 
-  document.addEventListener('DOMContentLoaded', boot);
+  document.addEventListener('DOMContentLoaded', () => {
+    boot().catch(error => {
+      const message = error && error.message ? error.message : String(error);
+      console.error('[OpenClaw Debugger] UI 初始化失败', error);
+      document.body.dataset.bootError = 'true';
+      const status = document.querySelector('#statusText');
+      if (status) {
+        status.textContent = '界面初始化失败：' + message;
+        status.classList.add('error-text');
+      }
+      const toast = document.querySelector('#toast');
+      if (toast) {
+        toast.textContent = '界面初始化失败，请重新启动调试器。';
+        toast.classList.add('error', 'show');
+      }
+    });
+  });
 })();

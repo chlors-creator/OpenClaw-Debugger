@@ -165,6 +165,9 @@ public sealed partial class RemoteOpenClawClient : IDisposable
             response["size"]?.GetValue<long>() ?? 0,
             response["sha256"]?.GetValue<string>() ?? expectedSha256);
     }
+
+    public void Disconnect() => _session.Disconnect();
+
     public void Dispose() => _session.Dispose();
 
     private static DateTimeOffset? FromUnix(double? seconds)

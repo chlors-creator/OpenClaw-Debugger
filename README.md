@@ -16,7 +16,8 @@ OpenClaw Debugger 是一个运行在 Windows 上的本地桌面管理工具，�
 ### 连接、记忆与写入保护
 
 - 默认连接 `admin@106.14.173.90:22`，工作区为 `/home/admin/.openclaw/workspace`，表情包目录为 `/home/admin/.openclaw/workspace/stickers`。
-- 使用 Windows OpenSSH 客户端，并沿用当前 Windows 用户的 SSH 登录环境。用户确认在目标机器上 `ssh admin@106.14.173.90` 可以直接连接；不在仓库保存或要求输入私钥。
+- 应用启动并读取本机设置后会自动连接服务器；连接成功时顶部按钮显示“已连接”，悬停会切换为“断开连接”。点击后会关闭复用 SSH 会话并清空当前远程数据，按钮恢复为“连接服务器”，之后仍可重新连接。
+- 使用 Windows OpenSSH 客户端，并沿用当前 Windows 用户的 SSH 登录环境。程序优先解析 `C:\Windows\System32\OpenSSH\ssh.exe`，再检查 Git OpenSSH 和 PATH；也可用环境变量 `OPENCLAW_SSH_PATH` 指定客户端位置。用户确认在目标机器上 `ssh admin@106.14.173.90` 可以直接连接；不在仓库保存或要求输入私钥。
 - 读取工作区 Markdown、记忆目录内容、表情包目录清单和图片。远程可读写路径由客户端代码限制，不允许用路径穿越访问范围外文件。
 - 编辑记忆时先展示差异，保存前重新读取远端并比较 SHA-256，发现内容已变化则拒绝覆盖。
 - 写远端文件前把原内容保存到本机回滚目录，并使用 Windows DPAPI 保护。
@@ -169,6 +170,7 @@ OpenClaw-Debugger/
 - `StickerService.cs`、`StickerUploadService.cs` 和 `StickerThumbnailCache.cs` 分别负责表情包业务、上传会话和缩略图缓存；表情包操作不要重新放回窗口代码。
 - `BackupCoordinator.cs` 负责备份运行状态和按钮控制，`LocalServerBackupStore.cs` 负责本地归档，`RemoteSnapshotClient.cs` 负责快照域接口。
 - `RemoteFileClient.cs`、`RemoteStickerClient.cs` 和 `RemoteSnapshotClient.cs` 是三个远程域边界；`RemoteOpenClawClient.cs` 只保留领域门面，`RemoteAgentSession.cs` 管理复用 SSH 会话，`RemoteStickerStreamUploader.cs` 管理低内存流式上传，`RemoteAgentProgram.cs` 单独保存服务器端 Python 协议。新增远程功能时应遵循现有路径限制和哈希冲突检查。
+- 远程 Python 代理不再拼接进 SSH 命令行；SSH 只执行短命令，代理脚本先通过标准输入首行传递，随后继续复用同一输入流处理 JSON 或图片数据，避免 Windows 命令行长度限制（错误 206）。
 - `RemoteModelClient.cs` 是模型远程域边界；模型读写通过服务器上受限的 OpenClaw CLI 完成，不在客户端复制配置格式。`ModelService.cs` 校验模型引用、保存延迟记录并串行化排序、测试和添加操作。
 - `WebUi/app.js` 只负责编排和生命周期；`app-state.js` 管理跨控制器共享状态，`event-bindings.js` 管理 DOM、拖放和窗口事件，`memory-controller.js`、`sticker-controller.js`、`upload-controller.js`、`backup-controller.js`、`settings-controller.js` 各自维护对应功能；`bridge.js`、`theme.js`、`sticker-cache.js` 维护桥接、主题和缓存状态，样式覆盖集中在 `styles-overrides.css`。
 - `app-state.js` 只组合六个领域状态模块；连接、记忆读取、模型列表/延迟测试、图片预览、重命名、标签保存和备份均带代际检查或 `AbortController`，旧请求返回后不会覆盖当前页面。
@@ -210,6 +212,10 @@ OpenClaw-Debugger/
 - `OpenClawDebugger.Tests.csproj` 是无第三方测试依赖的运行器，用来验证备份控制和重试、上传分块幂等性、标签写入前置保护、协议校验、旧请求保护和日志脱敏。
 - 模型页面的桥接命令、模型引用校验、拖拽自动保存和延迟结果脱敏应在连接到测试服务器后做一次端到端检查；本地测试运行器不调用真实模型 API。
 
+### 按钮与 C# 桥接链路
+
+界面按钮由 `WebUi/event-bindings.js` 绑定 DOM 事件；控制器通过 `WebUi/bridge.js` 发送带协议版本和操作 ID 的消息；`BridgeDispatcher` 做来源、协议和参数校验，再交给 `BridgeCommandRouter` 及对应的 C# `*BridgeHandler`。因此 HTML 菜单不直接调用 WPF 控件，C# 远程操作通过这条桥接链路执行。若页面初始化异常，界面会在状态栏显示“界面初始化失败”，不会静默变成所有按钮无响应。
+
 ## 运行与构建
 
 环境要求：
@@ -241,7 +247,8 @@ dotnet run --project .\OpenClawDebugger.Tests.csproj
 
 ## 当前状态与交接提示
 
-- 最近一次基线构建：`Lifecycle` 配置输出到 `bin\Lifecycle\net10.0-windows`，构建成功，0 个警告、0 个错误；本次新增的 C# 核心模块通过独立语法/编译检查，8 项自动化测试全部通过，所有 Web UI JavaScript 文件均通过语法检查。没有执行真实服务器整机备份或恢复测试。
-- 桌面快捷方式仍按本机发布目录配置；构建输出切换后请从对应发布目录重新启动。已运行的旧窗口不会热更新；关闭后从桌面快捷方式重新启动即可加载新版。
+- 当前桌面快捷方式固定启动 `bin\Current\net10.0-windows\OpenClawDebugger.exe`，工作目录也固定为该目录；快捷方式图标来自同一输出中的 `OpenClawDebugger.exe`。应用启动时给 WebView 页面追加程序集时间戳查询参数，避免旧 HTML/JavaScript 缓存继续生效。
+- 最近一次 Current 构建成功，0 个警告、0 个错误；已确认模型选项卡存在、DOM 导航事件可触发，所有 Web UI JavaScript 文件均通过语法检查。没有执行真实服务器整机备份或恢复测试。
+- 2026-09-29 修复了一个会阻止整页事件绑定的前端初始化错误：表情包保存控制器已正确暴露 `save` 方法，`app.js` 也补齐 `saveStickerRows` 包装函数；同时增加启动异常的可见提示，并允许在自动连接长时间等待时点击“取消连接”。
 - 仓库目标目录是 `Openclaw\OpenClaw-Debugger`。此前项目从 Napcat 工作区迁移到 Openclaw；修改前应先核对当前实际工作目录，避免改错同名目录。
 - 新对话开始时先读本 README、`git status` 和相关源码，再确认用户当前要改的功能。不要假设工作树干净，也不要把私密目录复制进仓库。

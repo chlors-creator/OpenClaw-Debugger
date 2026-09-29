@@ -2,7 +2,7 @@
   'use strict';
   function create(deps) {
     const {
-      $, $$, appState, switchTab, connectServer, toggleBackupPause, cancelBackup,
+      $, $$, appState, switchTab, connectServer, toggleConnection, syncConnectionButton, toggleBackupPause, cancelBackup,
       saveConnectionSettings, bridgeCall, reportError, setStatus, setDirtyState, saveMemory,
       renderMemoryList, renderStickerList, saveStickerRows, openRawEditor,
       testModelLatency, openAddModelDialog, submitAddModel,
@@ -14,7 +14,12 @@
 
     $$('.nav-tab').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
     $$('[data-go]').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.go)));
-    $('#connectButton').addEventListener('click', connectServer);
+    const connectionButton = $('#connectButton');
+    connectionButton.addEventListener('click', toggleConnection);
+    connectionButton.addEventListener('mouseenter', syncConnectionButton);
+    connectionButton.addEventListener('mouseleave', syncConnectionButton);
+    connectionButton.addEventListener('focusin', syncConnectionButton);
+    connectionButton.addEventListener('focusout', syncConnectionButton);
     $('#refreshButton').addEventListener('click', connectServer);
     $('#backupButton').addEventListener('click', toggleBackupPause);
     $('#cancelBackupButton').addEventListener('click', cancelBackup);
@@ -102,6 +107,7 @@
     $$('.theme-option').forEach(button => button.addEventListener('click', () => persistTheme(button.dataset.theme)));
     window.addEventListener('beforeunload', event => {
       appState.connection.connectController?.abort();
+      appState.connection.disconnectController?.abort();
       appState.memory.readController?.abort();
       appState.memory.saveController?.abort();
       appState.sticker.previewController?.abort();

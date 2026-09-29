@@ -173,6 +173,7 @@
     return {
       renderList: renderStickerList,
       select: selectSticker,
+      save: saveStickerRows,
       openRename: openRenameDialog,
       submitRename: submitStickerRename,
       rowsPayload,

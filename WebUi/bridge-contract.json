@@ -5,6 +5,7 @@
     "saveSettings": { "mode": "local", "domain": "settings", "timeoutMs": 30000, "payload": { "host": "string", "username": "string", "port": "integer", "workspacePath": "string", "stickersPath": "string", "backupRetentionCount": "integer" } },
     "setTheme": { "mode": "local", "domain": "settings", "timeoutMs": 15000, "payload": { "theme": "string" } },
     "connect": { "mode": "remote", "domain": "connection", "timeoutMs": 600000, "payload": {} },
+    "disconnect": { "mode": "control", "domain": "connection", "timeoutMs": 30000, "payload": {} },
     "readMemory": { "mode": "remote", "domain": "read", "timeoutMs": 180000, "payload": { "path": "string" } },
     "saveMemory": { "mode": "remote", "domain": "edit", "timeoutMs": 300000, "payload": { "path": "string", "expectedSha256": "string", "text": "string" } },
     "getModels": { "mode": "remote", "domain": "model", "timeoutMs": 180000, "payload": {} },

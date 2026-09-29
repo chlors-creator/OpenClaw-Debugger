@@ -213,7 +213,7 @@ public sealed class RemoteSnapshotTransport
     {
         var start = new ProcessStartInfo
         {
-            FileName = "ssh.exe",
+            FileName = SshCommandRunner.ResolveExecutable(),
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = redirectOutput,
@@ -236,7 +236,7 @@ public sealed class RemoteSnapshotTransport
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             process.Dispose();
-            throw new InvalidOperationException("找不到或无法启动 ssh.exe，请确认 Windows OpenSSH Client 已安装。", ex);
+            throw new InvalidOperationException($"无法启动 Windows OpenSSH：{start.FileName}\n{ex.Message}", ex);
         }
     }
 
