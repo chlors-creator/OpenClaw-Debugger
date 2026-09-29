@@ -198,7 +198,8 @@
     const activeButton = $('.nav-tab.active');
     const nav = $('.main-nav');
     if (activeButton) nav.style.setProperty('--active-x', activeButton.offsetLeft + 'px');
-    if (name === 'models' && $('.connection-chip').classList.contains('connected')) appState.modelController?.load();
+    if (name === 'models' && $('.connection-chip').classList.contains('connected') &&
+        !appState.model.snapshot && !appState.model.loading) appState.modelController?.load();
   }
 
   function setDirtyState() {

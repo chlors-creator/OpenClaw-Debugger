@@ -136,31 +136,43 @@
       $('#testModelLatencyButton').disabled = !connected || state.loading || state.testing || state.saving || !selectedModels(state.snapshot).length;
       $('#addModelButton').disabled = !connected || state.loading || state.testing || state.saving || state.adding;
       document.body.classList.toggle('model-operation-active', state.testing || state.saving || state.adding);
-      if (state.testing) $('#modelLatencyStatus').textContent = '正在逐个探测模型，可能产生少量 API 请求…';
+      if (state.loading) $('#modelLatencyStatus').textContent = '正在读取服务器模型配置…';
+      else if (state.testing) $('#modelLatencyStatus').textContent = '正在逐个探测模型，可能产生少量 API 请求…';
       else if (state.saving) $('#modelLatencyStatus').textContent = '正在把拖拽后的顺序写入服务器…';
       else if (state.adding) $('#modelLatencyStatus').textContent = '正在写入新模型配置…';
       else if (!state.snapshot) $('#modelLatencyStatus').textContent = connected ? '点击“测试延迟”或加载模型配置。' : '连接服务器后读取模型配置。';
     }
 
-    async function load() {
-      if (!isConnected()) return;
-      state.loadController?.abort();
+    function load() {
+      if (!isConnected()) return Promise.resolve(null);
+      // 连接成功后会自动读取一次；进入模型页时复用同一个请求，
+      // 不要中止并立即重发，否则宿主仍在释放上一个 SSH 操作时会被判定为忙碌。
+      if (state.loadPromise) return state.loadPromise;
+      if (state.snapshot && !state.loading) return Promise.resolve(state.snapshot);
       const controller = new AbortController();
       const generation = ++state.loadGeneration;
       state.loadController = controller;
       state.loading = true;
       syncButtons();
-      try {
-        const snapshot = await bridgeCall('getModels', {}, { signal: controller.signal });
-        if (generation !== state.loadGeneration || controller.signal.aborted) return;
-        state.snapshot = snapshot;
-        render();
-      } catch (error) {
-        if (!controller.signal.aborted && !(error && error.name === 'AbortError')) reportError(error);
-      } finally {
-        if (state.loadController === controller) state.loadController = null;
-        if (generation === state.loadGeneration) { state.loading = false; syncButtons(); }
-      }
+      let operation;
+      operation = (async () => {
+        try {
+          const snapshot = await bridgeCall('getModels', {}, { signal: controller.signal });
+          if (generation !== state.loadGeneration || controller.signal.aborted) return null;
+          state.snapshot = snapshot;
+          render();
+          return snapshot;
+        } catch (error) {
+          if (!controller.signal.aborted && !(error && error.name === 'AbortError')) reportError(error);
+          return null;
+        } finally {
+          if (state.loadController === controller) state.loadController = null;
+          if (state.loadPromise === operation) state.loadPromise = null;
+          if (generation === state.loadGeneration) { state.loading = false; syncButtons(); }
+        }
+      })();
+      state.loadPromise = operation;
+      return operation;
     }
 
     async function persistOrder(ids) {
@@ -260,8 +272,15 @@
     }
 
     function reset() {
+      state.loadGeneration++;
+      state.testGeneration++;
+      state.orderGeneration++;
+      state.addGeneration++;
       state.loadController?.abort(); state.testController?.abort(); state.orderController?.abort(); state.addController?.abort();
-      state.snapshot = null; state.loading = false; state.testing = false; state.saving = false; state.adding = false; render();
+      state.loadPromise = null;
+      state.snapshot = null; state.loading = false; state.testing = false; state.saving = false; state.adding = false;
+      state.draggedId = null; state.pendingOrder = null;
+      render();
     }
 
     return { load, render, testLatency, openAddDialog, submitAdd, reset, syncButtons };

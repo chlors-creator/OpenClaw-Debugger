@@ -13,6 +13,7 @@
         orderGeneration: 0,
         addGeneration: 0,
         loadController: null,
+        loadPromise: null,
         testController: null,
         orderController: null,
         addController: null,
