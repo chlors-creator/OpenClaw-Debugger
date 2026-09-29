@@ -138,6 +138,7 @@
       row.addEventListener('dragend', () => {
         state.draggedId = null;
         row.classList.remove('dragging', 'drop-target');
+        $('#modelAvailableList')?.classList.remove('drop-target');
         document.querySelectorAll('.model-order-row').forEach(item => item.classList.remove('drop-target'));
       });
       return row;
@@ -173,6 +174,36 @@
 
     function renderAvailable(snapshot) {
       const list = $('#modelAvailableList');
+      if (!list.dataset.dropBound) {
+        list.dataset.dropBound = 'true';
+        list.setAttribute('aria-label', '可用模型；将备选模型拖到这里可移出备选队列');
+        list.addEventListener('dragover', event => {
+          const draggedId = state.draggedId || event.dataTransfer.getData('text/plain');
+          const selected = selectedModels(state.snapshot);
+          const index = selected.findIndex(model => String(model.id).toLowerCase() === String(draggedId || '').toLowerCase());
+          if (state.saving || state.refreshing || index <= 0) {
+            list.classList.remove('drop-target');
+            return;
+          }
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          list.classList.add('drop-target');
+        });
+        list.addEventListener('dragleave', event => {
+          if (!event.relatedTarget || !list.contains(event.relatedTarget)) list.classList.remove('drop-target');
+        });
+        list.addEventListener('drop', event => {
+          event.preventDefault();
+          list.classList.remove('drop-target');
+          if (state.saving || state.refreshing) return;
+          const draggedId = state.draggedId || event.dataTransfer.getData('text/plain');
+          const selected = selectedModels(state.snapshot);
+          const index = selected.findIndex(model => String(model.id).toLowerCase() === String(draggedId || '').toLowerCase());
+          state.draggedId = null;
+          if (index <= 0) return;
+          removeFallback(draggedId);
+        });
+      }
       list.replaceChildren();
       const selected = new Set(selectedModels(snapshot).map(model => String(model.id || '').toLowerCase()));
       const models = (snapshot && snapshot.available || []).filter(model => {
@@ -181,7 +212,7 @@
       });
       if (!models.length) {
         list.className = 'model-available-list empty-state';
-        list.textContent = '没有其它已发现模型。';
+        list.textContent = '没有其它已发现模型；可将备选模型拖到这里移除。';
         return;
       }
       list.className = 'model-available-list';
@@ -383,32 +414,39 @@
       return ordered.length === ids.length ? ordered : null;
     }
 
-    function applyLocalOrder(snapshot, ids, ordered) {
+    function applyLocalOrder(snapshot, ids, ordered, returnedModels = []) {
       const selected = new Set(ids.map(id => String(id).toLowerCase()));
+      const available = new Map();
+      [...(snapshot.available || []), ...returnedModels].forEach(model => {
+        const id = String(model && model.id || '').toLowerCase();
+        if (id && !selected.has(id) && !available.has(id)) available.set(id, model);
+      });
       state.snapshot = {
         ...snapshot,
         primary: ordered[0],
         fallbacks: ordered.slice(1),
-        available: (snapshot.available || []).filter(model => !selected.has(String(model && model.id || '').toLowerCase()))
+        available: [...available.values()]
       };
     }
 
-    async function persistOrder(ids) {
+    async function persistOrder(ids, options = {}) {
       if (!isConnected() || state.refreshing || !Array.isArray(ids) || ids.length < 1) return;
-      const previous = state.snapshot;
-      const ordered = resolveOrder(previous, ids);
+      const source = options.sourceSnapshot || state.snapshot;
+      const previous = options.rollbackSnapshot || state.snapshot;
+      const ordered = resolveOrder(source, ids);
       if (!ordered) { await load(); return; }
-      applyLocalOrder(previous, ids, ordered);
+      applyLocalOrder(source, ids, ordered, options.returnedModels || []);
       state.snapshotCachedAt = Date.now();
       if (state.saving) {
         state.pendingOrder = ids.slice();
-        setStatus('已加入备选，已排队等待当前顺序保存完成。');
+        setStatus((options.actionText || '已加入备选') + '，已排队等待当前顺序保存完成。');
         render();
         syncButtons();
         return;
       }
       state.pendingOrder = null;
-      setStatus('已加入备选，正在写入服务器…');
+      const actionText = options.actionText || '已加入备选';
+      setStatus(actionText + '，正在写入服务器…');
       render();
       state.saving = true;
       state.orderController?.abort();
@@ -421,14 +459,14 @@
         if (generation !== state.orderGeneration || controller.signal.aborted) return;
         applySnapshot(result);
         render();
-        setStatus('模型选择顺序已自动保存到服务器。');
-        showToast('模型顺序已保存。');
+        setStatus(options.successText || '模型选择顺序已自动保存到服务器。');
+        showToast(options.toastText || '模型顺序已保存。');
       } catch (error) {
         if (generation !== state.orderGeneration || controller.signal.aborted) return;
         state.snapshot = previous;
         render();
         reportError(error);
-        showToast('模型顺序保存失败，已恢复原顺序。', true);
+        showToast(options.failureText || '模型顺序保存失败，已恢复原顺序。', true);
       } finally {
         if (state.orderController === controller) state.orderController = null;
         if (generation === state.orderGeneration) {
@@ -441,6 +479,31 @@
         }
       }
     }
+
+    function removeFallback(modelId) {
+      if (!isConnected() || state.saving || state.refreshing || !state.snapshot) return;
+      const previous = state.snapshot;
+      const selected = selectedModels(previous);
+      const index = selected.findIndex(model => String(model.id).toLowerCase() === String(modelId || '').toLowerCase());
+      if (index <= 0) return;
+      const removed = selected[index];
+      const ids = selected.filter((_, itemIndex) => itemIndex !== index).map(model => model.id);
+      const optimistic = {
+        ...previous,
+        primary: selected[0],
+        fallbacks: selected.slice(1).filter((_, itemIndex) => itemIndex !== index - 1),
+        available: [...(previous.available || []), removed]
+      };
+      void persistOrder(ids, {
+        sourceSnapshot: optimistic,
+        rollbackSnapshot: previous,
+        actionText: '已移出备选',
+        successText: '备选模型已移除并保存到服务器。',
+        toastText: '已移出备选模型。',
+        failureText: '移除备选模型保存失败，已恢复原顺序。'
+      });
+    }
+
     async function testLatency() {
       if (!isConnected()) return;
       if (state.refreshing) return;
