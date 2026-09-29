@@ -825,6 +825,68 @@ def model_provider_config(ref):
         return None
     return base_url.rstrip("/") + "/chat/completions", api_key.strip(), model_id
 
+def read_probe_response(response, started, measurement):
+    content_type = str(response.headers.get("content-type") or "").lower()
+    try:
+        if "text/event-stream" in content_type:
+            while True:
+                line = response.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").strip()
+                if not text.lower().startswith("data:"):
+                    continue
+                data = text[5:].strip()
+                if data and data != "[DONE]":
+                    return {"success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "measurement": measurement}
+            return {"success": False, "latencyMs": None, "error": "模型未返回首个流式事件", "measurement": measurement}
+        response.read(64 * 1024)
+        return {"success": True, "latencyMs": max(1, int((time.perf_counter() - started) * 1000)), "error": None, "measurement": measurement}
+    finally:
+        try: response.close()
+        except Exception: pass
+
+def gateway_model_probe(ref):
+    # 官方模型密钥由 Gateway 的认证存储管理，不能从 models.providers 直接读取。
+    # 通过本机 OpenAI-compatible Gateway 端点探测，避免每次启动 openclaw CLI。
+    port, auth_kind, secret = gateway_settings()
+    started = time.perf_counter()
+    payload = json.dumps({
+        "model": "openclaw/default",
+        "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": True,
+    }, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+        "User-Agent": "OpenClaw-Debugger/1.0",
+        "x-openclaw-model": ref,
+        "x-openclaw-agent-id": "main",
+    }
+    if secret:
+        headers["Authorization"] = "Bearer " + secret
+    request = urllib.request.Request(
+        "http://127.0.0.1:%d/v1/chat/completions" % port,
+        data=payload,
+        method="POST",
+        headers=headers,
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=8)
+        return read_probe_response(response, started, "gateway_first_event")
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try: detail = error.read(512).decode("utf-8", "replace")
+        except Exception: pass
+        # 未开启兼容端点时交给 direct/CLI 回退；认证和模型错误应直接展示。
+        if error.code in (404, 405, 501): return None
+        return {"success": False, "latencyMs": None, "error": redact_cli_error("Gateway HTTP " + str(error.code) + (": " + detail if detail else "")), "measurement": "gateway_first_event"}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        # Gateway HTTP 兼容端点可能未启用，不把连接失败误报为模型失败。
+        return None
+
 def direct_model_probe(ref):
     # 以最小流式请求测首个 SSE 事件，避免启动一次完整 OpenClaw CLI。
     configured = model_provider_config(ref)
@@ -852,29 +914,7 @@ def direct_model_probe(ref):
     )
     try:
         response = urllib.request.urlopen(request, timeout=8)
-        content_type = str(response.headers.get("content-type") or "").lower()
-        if "text/event-stream" in content_type:
-            while True:
-                line = response.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", "replace").strip()
-                if not text.lower().startswith("data:"):
-                    continue
-                data = text[5:].strip()
-                if data and data != "[DONE]":
-                    latency = max(1, int((time.perf_counter() - started) * 1000))
-                    try: response.close()
-                    except Exception: pass
-                    return {"success": True, "latencyMs": latency, "error": None, "measurement": "first_event"}
-            try: response.close()
-            except Exception: pass
-            return {"success": False, "latencyMs": None, "error": "模型未返回首个流式事件", "measurement": "first_event"}
-        response.read(64 * 1024)
-        latency = max(1, int((time.perf_counter() - started) * 1000))
-        try: response.close()
-        except Exception: pass
-        return {"success": True, "latencyMs": latency, "error": None, "measurement": "complete"}
+        return read_probe_response(response, started, "first_event")
     except urllib.error.HTTPError as error:
         detail = ""
         try: detail = error.read(512).decode("utf-8", "replace")
@@ -894,6 +934,11 @@ def models_test_latency():
     def probe(ref):
         started = time.perf_counter()
         try:
+            gateway = gateway_model_probe(ref)
+            if gateway is not None:
+                gateway["modelId"] = ref
+                gateway["testedAtUtc"] = tested
+                return gateway
             direct = direct_model_probe(ref)
             if direct is not None:
                 direct["modelId"] = ref
