@@ -6,7 +6,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>Assets\OpenClawDebugger.ico</ApplicationIcon>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="OpenClawDebugger.Tests.Program.cs" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
     <Resource Include="Assets\OpenClawDebugger.ico" />

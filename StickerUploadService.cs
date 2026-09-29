@@ -38,6 +38,35 @@ public sealed class StickerUploadService : IDisposable
     private const int MaximumSessions = 3;
 
     private readonly Dictionary<string, StickerUploadSession> _sessions = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
+
+    public StickerUploadService(string? privateDirectory = null)
+    {
+        if (!string.IsNullOrWhiteSpace(privateDirectory))
+            CleanupStaging(privateDirectory);
+    }
+
+    public static int CleanupStaging(string privateDirectory)
+    {
+        var stagingDirectory = Path.Combine(Path.GetFullPath(privateDirectory), "UploadStaging");
+        if (!Directory.Exists(stagingDirectory)) return 0;
+        if ((new DirectoryInfo(stagingDirectory).Attributes & FileAttributes.ReparsePoint) != 0) return 0;
+        var deleted = 0;
+        foreach (var path in Directory.EnumerateFiles(stagingDirectory, ".upload-*.part", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                File.Delete(path);
+                deleted++;
+            }
+            catch
+            {
+                // A current process may still own a staging file; leave it for the next startup pass.
+            }
+        }
+        OperationLogStore.Current?.Stage("upload-staging-cleanup", $"清理未完成上传临时文件：{deleted} 个");
+        return deleted;
+    }
 
     public StickerUploadBeginResult Begin(
         string fileName,
@@ -45,7 +74,6 @@ public sealed class StickerUploadService : IDisposable
         IReadOnlyList<RemoteFile> files,
         string privateDirectory)
     {
-        if (_sessions.Count >= MaximumSessions) throw new InvalidOperationException("请先完成当前上传，再开始其他上传。");
         ValidateFileName(fileName, allowMessageSpacing: true);
         if (size is < 1 or > MaximumUploadSize) throw new InvalidDataException("每张图片大小需在 1 B 到 16 MiB 之间。");
         if (files.Any(x => x.Root == "stickers" && x.RelativePath.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
@@ -55,61 +83,77 @@ public sealed class StickerUploadService : IDisposable
         var stagingDirectory = Path.Combine(privateDirectory, "UploadStaging");
         Directory.CreateDirectory(stagingDirectory);
         var temporaryPath = Path.Combine(stagingDirectory, ".upload-" + id + ".part");
-        _sessions[id] = new StickerUploadSession(fileName, size, temporaryPath);
+        lock (_gate)
+        {
+            if (_sessions.Count >= MaximumSessions) throw new InvalidOperationException("请先完成当前上传，再开始其他上传。");
+            _sessions[id] = new StickerUploadSession(fileName, size, temporaryPath);
+        }
         return new StickerUploadBeginResult(id, ChunkSize);
     }
 
     public StickerUploadAppendResult Append(string uploadId, long offset, string contentBase64, string expectedSha256)
     {
-        if (!_sessions.TryGetValue(uploadId, out var session))
-            throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
-
-        byte[] chunk;
-        try { chunk = Convert.FromBase64String(contentBase64); }
-        catch (FormatException)
+        lock (_gate)
         {
-            RemoveAndDispose(uploadId, session);
-            throw new InvalidDataException("上传数据编码无效。");
-        }
+            if (!_sessions.TryGetValue(uploadId, out var session))
+                throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
 
-        if (chunk.Length is < 1 or > ChunkSize || offset < 0 || offset > session.Size || offset + chunk.Length > session.Size)
-        {
-            throw new InvalidDataException("上传分块大小或总长度超出限制。");
-        }
-        var actualSha256 = Convert.ToHexString(SHA256.HashData(chunk)).ToLowerInvariant();
-        if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("上传分块校验失败，请重试当前分块。");
+            byte[] chunk;
+            try { chunk = Convert.FromBase64String(contentBase64); }
+            catch (FormatException)
+            {
+                _sessions.Remove(uploadId);
+                session.Dispose();
+                throw new InvalidDataException("上传数据编码无效。");
+            }
 
-        if (offset < session.Content.Length)
-        {
-            if (offset + chunk.Length == session.Content.Length &&
-                session.ChunkHashes.TryGetValue(offset, out var priorHash) &&
-                string.Equals(priorHash, actualSha256, StringComparison.OrdinalIgnoreCase))
-                return new StickerUploadAppendResult(session.Content.Length, session.Size);
-            throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
+            if (chunk.Length is < 1 or > ChunkSize || offset < 0 || offset > session.Size || offset + chunk.Length > session.Size)
+                throw new InvalidDataException("上传分块大小或总长度超出限制。");
+            var actualSha256 = Convert.ToHexString(SHA256.HashData(chunk)).ToLowerInvariant();
+            if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("上传分块校验失败，请重试当前分块。");
+
+            if (offset < session.Content.Length)
+            {
+                if (offset + chunk.Length == session.Content.Length &&
+                    session.ChunkHashes.TryGetValue(offset, out var priorHash) &&
+                    string.Equals(priorHash, actualSha256, StringComparison.OrdinalIgnoreCase))
+                    return new StickerUploadAppendResult(session.Content.Length, session.Size);
+                throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
+            }
+            if (offset != session.Content.Length)
+                throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
+            session.Content.Write(chunk, 0, chunk.Length);
+            session.ChunkHashes[offset] = actualSha256;
+            return new StickerUploadAppendResult(session.Content.Length, session.Size);
         }
-        if (offset != session.Content.Length)
-            throw new InvalidDataException("上传分块位置不匹配，请重新开始上传。");
-        session.Content.Write(chunk, 0, chunk.Length);
-        session.ChunkHashes[offset] = actualSha256;
-        return new StickerUploadAppendResult(session.Content.Length, session.Size);
     }
 
     public StickerUploadSession TakeForCommit(string uploadId)
     {
-        if (_sessions.Remove(uploadId, out var session)) return session;
+        lock (_gate)
+        {
+            if (_sessions.Remove(uploadId, out var session)) return session;
+        }
         throw new InvalidOperationException("上传会话已失效，请重新选择图片。");
     }
 
     public void Cancel(string uploadId)
     {
-        if (_sessions.Remove(uploadId, out var session)) session.Dispose();
+        StickerUploadSession? session = null;
+        lock (_gate) _sessions.Remove(uploadId, out session);
+        session?.Dispose();
     }
 
     public void Dispose()
     {
-        foreach (var session in _sessions.Values) session.Dispose();
-        _sessions.Clear();
+        StickerUploadSession[] sessions;
+        lock (_gate)
+        {
+            sessions = _sessions.Values.ToArray();
+            _sessions.Clear();
+        }
+        foreach (var session in sessions) session.Dispose();
     }
 
     public static void ValidateFileName(string fileName, bool allowMessageSpacing = false)
@@ -139,9 +183,4 @@ public sealed class StickerUploadService : IDisposable
         };
     }
 
-    private void RemoveAndDispose(string uploadId, StickerUploadSession session)
-    {
-        _sessions.Remove(uploadId);
-        session.Dispose();
-    }
 }

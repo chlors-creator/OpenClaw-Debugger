@@ -71,6 +71,30 @@
       return;
     }
 
+    if (phase === 'verifying') {
+      $('#backupProgressTitle').textContent = '正在校验服务器快照';
+      $('#backupProgressDetail').textContent = data.message || '正在读取压缩包并检查完整性';
+      $('#backupProgressPercent').textContent = '校验中';
+      $('#backupSpeed').textContent = '—';
+      $('#backupEta').textContent = '校验中';
+      track.setAttribute('aria-busy', 'true');
+      track.setAttribute('aria-valuenow', '99');
+      bar.style.width = '99%';
+      return;
+    }
+
+    if (phase === 'finalizing') {
+      $('#backupProgressTitle').textContent = '正在整理备份';
+      $('#backupProgressDetail').textContent = data.message || '正在原子提交清单并清理旧备份';
+      $('#backupProgressPercent').textContent = '即将完成';
+      $('#backupSpeed').textContent = '—';
+      $('#backupEta').textContent = '即将完成';
+      track.setAttribute('aria-busy', 'true');
+      track.setAttribute('aria-valuenow', '99');
+      bar.style.width = '99%';
+      return;
+    }
+
     if (phase === 'cancelled') {
       $('#backupProgressTitle').textContent = '备份已取消';
       $('#backupProgressDetail').textContent = data.message || '临时文件已清理，可以重新开始备份';

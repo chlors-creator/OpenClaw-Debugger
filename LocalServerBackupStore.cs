@@ -1,4 +1,5 @@
 using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -22,6 +23,7 @@ public sealed record ServerSnapshotResult(string Directory, string ArchivePath, 
 public sealed class LocalServerBackupStore(string rootDirectory)
 {
     private const int MaximumAttempts = 8;
+    private const long MinimumFreeSpaceBytes = 512L * 1024 * 1024;
     public string RootDirectory => Path.GetFullPath(rootDirectory);
 
     public async Task<ServerSnapshotResult> CreateAsync(
@@ -29,12 +31,15 @@ public sealed class LocalServerBackupStore(string rootDirectory)
         IRemoteSnapshotClient remote,
         IProgress<ServerSnapshotProgress>? progress = null,
         BackupPauseController? pauseController = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int retentionCount = 5)
     {
         Directory.CreateDirectory(RootDirectory);
+        EnsureLocalDiskSpace(0);
         var staging = Path.Combine(RootDirectory, ".staging-" + Guid.NewGuid().ToString("N"));
         var archiveName = "server-rootfs.tar.gz";
         var archivePath = Path.Combine(staging, archiveName);
+        var archivePartPath = archivePath + ".part";
         var remoteArchive = "/tmp/.openclaw-debugger-" + Guid.NewGuid().ToString("N") + ".tar.gz";
         Directory.CreateDirectory(staging);
 
@@ -42,14 +47,17 @@ public sealed class LocalServerBackupStore(string rootDirectory)
         {
             progress?.Report(new ServerSnapshotProgress("preparing", 0, null, null, null, 1, MaximumAttempts,
                 "正在服务器端生成可断点读取的快照归档"));
+            OperationLogStore.Current?.Stage("preparing", "正在服务器端生成快照");
             if (pauseController is not null)
                 await pauseController.WaitIfPausedAsync(cancellationToken);
             await CreateRemoteSnapshotWithRetryAsync(settings, remote, remoteArchive, progress, pauseController, cancellationToken);
             if (pauseController is not null)
                 await pauseController.WaitIfPausedAsync(cancellationToken);
             var totalBytes = await remote.GetServerSnapshotSizeAsync(settings, remoteArchive, cancellationToken);
+            EnsureLocalDiskSpace(totalBytes);
             progress?.Report(new ServerSnapshotProgress("transferring", 0, totalBytes, null, null, 1, MaximumAttempts,
                 "快照已生成，开始传输；网络中断后会从本机临时文件长度继续"));
+            OperationLogStore.Current?.Stage("transferring", $"开始传输快照，共 {totalBytes} 字节");
 
             RemoteSnapshotTransferResult? transfer = null;
             var transferAttempt = 1;
@@ -60,16 +68,16 @@ public sealed class LocalServerBackupStore(string rootDirectory)
                 {
                     if (pauseController is not null)
                         await pauseController.WaitIfPausedAsync(cancellationToken);
-                    var existingBytes = File.Exists(archivePath) ? new FileInfo(archivePath).Length : 0;
+                    var existingBytes = File.Exists(archivePartPath) ? new FileInfo(archivePartPath).Length : 0;
                     if (existingBytes > totalBytes)
                     {
-                        File.Delete(archivePath);
+                        File.Delete(archivePartPath);
                         existingBytes = 0;
                     }
                     progress?.Report(new ServerSnapshotProgress("transferring", existingBytes, totalBytes, null, null, attempt, MaximumAttempts,
                         existingBytes > 0 ? $"从 {FormatBytes(existingBytes)} 继续传输" : null));
                     await using var output = new FileStream(
-                        archivePath, existingBytes > 0 ? FileMode.OpenOrCreate : FileMode.Create,
+                        archivePartPath, existingBytes > 0 ? FileMode.OpenOrCreate : FileMode.Create,
                         FileAccess.ReadWrite, FileShare.Read,
                         256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
                     output.Position = existingBytes;
@@ -85,11 +93,12 @@ public sealed class LocalServerBackupStore(string rootDirectory)
                 }
                 catch (SnapshotTransferInterruptedException) when (attempt < MaximumAttempts)
                 {
-                    var retained = File.Exists(archivePath) ? new FileInfo(archivePath).Length : 0;
+                    var retained = File.Exists(archivePartPath) ? new FileInfo(archivePartPath).Length : 0;
                     var delay = RetryDelay(attempt);
                     progress?.Report(new ServerSnapshotProgress(
                         "retrying", retained, totalBytes, null, null, attempt + 1, MaximumAttempts,
                         $"传输连接中断；保留 {FormatBytes(retained)}，{delay.TotalSeconds:0} 秒后继续。"));
+                    OperationLogStore.Current?.Stage("retrying", "传输连接中断，保留已接收数据后继续", attempt + 1);
                     await Task.Delay(delay, cancellationToken);
                 }
                 catch (SnapshotTransferInterruptedException ex)
@@ -102,7 +111,13 @@ public sealed class LocalServerBackupStore(string rootDirectory)
             if (transfer is null)
                 throw new InvalidOperationException("服务器快照传输未能完成。");
 
-            var archiveBytes = new FileInfo(archivePath).Length;
+            var archiveBytes = new FileInfo(archivePartPath).Length;
+            progress?.Report(new ServerSnapshotProgress("verifying", archiveBytes, totalBytes, null, null, transferAttempt, MaximumAttempts,
+                "正在验证 gzip 压缩包完整性"));
+            OperationLogStore.Current?.Stage("verifying", "正在验证本地压缩包");
+            await VerifyArchiveAsync(archivePartPath, cancellationToken);
+            File.Move(archivePartPath, archivePath, overwrite: false);
+            archiveBytes = new FileInfo(archivePath).Length;
             if (archiveBytes != totalBytes)
                 throw new InvalidDataException("本机快照归档大小校验失败。");
             var archiveSha256 = await ComputeSha256Async(archivePath, cancellationToken);
@@ -119,12 +134,18 @@ public sealed class LocalServerBackupStore(string rootDirectory)
                 ["/proc", "/sys", "/dev", "/run"],
                 "Live file-level capture; files may change while being read. This is not an atomic disk or volume snapshot.");
             var manifestJson = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(
-                Path.Combine(staging, "snapshot-manifest.json"), manifestJson, new UTF8Encoding(false), cancellationToken);
+            var manifestPath = Path.Combine(staging, "snapshot-manifest.json");
+            var manifestTemporary = manifestPath + ".tmp";
+            await File.WriteAllTextAsync(manifestTemporary, manifestJson, new UTF8Encoding(false), cancellationToken);
+            File.Move(manifestTemporary, manifestPath, overwrite: false);
 
             var backupName = $"{created:yyyyMMdd-HHmmss}_{Guid.NewGuid().ToString("N")[..8]}";
             var finalDirectory = Path.Combine(RootDirectory, backupName);
             Directory.Move(staging, finalDirectory);
+            progress?.Report(new ServerSnapshotProgress("finalizing", archiveBytes, archiveBytes, null, null, transferAttempt, MaximumAttempts,
+                "快照已校验，正在清理旧备份"));
+            OperationLogStore.Current?.Stage("finalizing", "正在原子提交快照并清理旧备份");
+            CleanupRetention(retentionCount);
             progress?.Report(new ServerSnapshotProgress(
                 "completed", archiveBytes, archiveBytes, null, 0, transferAttempt, MaximumAttempts));
             return new ServerSnapshotResult(
@@ -187,6 +208,84 @@ public sealed class LocalServerBackupStore(string rootDirectory)
             hash.AppendData(buffer, 0, read);
         }
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static async Task VerifyArchiveAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var gzip = new GZipStream(input, CompressionMode.Decompress, leaveOpen: false);
+        var buffer = new byte[256 * 1024];
+        var total = 0L;
+        while (true)
+        {
+            var read = await gzip.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (read == 0) break;
+            if (total > long.MaxValue - read) throw new InvalidDataException("压缩包解压大小溢出。");
+            total += read;
+        }
+    }
+
+    private void EnsureLocalDiskSpace(long archiveBytes)
+    {
+        var root = Path.GetPathRoot(RootDirectory);
+        if (string.IsNullOrWhiteSpace(root)) throw new IOException("无法确定备份目录所在磁盘。");
+        var drive = new DriveInfo(root);
+        if (!drive.IsReady) throw new IOException("备份目录所在磁盘当前不可用。");
+        var required = Math.Max(0, archiveBytes) + MinimumFreeSpaceBytes;
+        if (drive.AvailableFreeSpace < required)
+            throw new IOException($"本地磁盘空间不足：至少需要 {FormatBytes(required)}，当前可用 {FormatBytes(drive.AvailableFreeSpace)}。");
+        OperationLogStore.Current?.Stage("disk-preflight", $"本地可用空间 {FormatBytes(drive.AvailableFreeSpace)}，预计新增 {FormatBytes(Math.Max(0, archiveBytes))}");
+    }
+
+    public static int CleanupStagingDirectories(string rootDirectory)
+    {
+        var root = Path.GetFullPath(rootDirectory);
+        if (!Directory.Exists(root)) return 0;
+        var deleted = 0;
+        foreach (var directory in Directory.EnumerateDirectories(root, ".staging-*", SearchOption.TopDirectoryOnly))
+        {
+            if ((new DirectoryInfo(directory).Attributes & FileAttributes.ReparsePoint) != 0) continue;
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+                deleted++;
+            }
+            catch
+            {
+                // A backup that is still being written is retained until its owner exits.
+            }
+        }
+        OperationLogStore.Current?.Stage("backup-staging-cleanup", $"清理残留备份临时目录：{deleted} 个");
+        return deleted;
+    }
+
+    private void CleanupRetention(int retentionCount)
+    {
+        var keep = Math.Clamp(retentionCount, 1, 30);
+        DirectoryInfo[] directories;
+        try
+        {
+            directories = Directory.EnumerateDirectories(RootDirectory, "*", SearchOption.TopDirectoryOnly)
+                .Where(path => !Path.GetFileName(path).StartsWith(".staging-", StringComparison.OrdinalIgnoreCase))
+                .Where(path => (new DirectoryInfo(path).Attributes & FileAttributes.ReparsePoint) == 0)
+                .Where(path => File.Exists(Path.Combine(path, "server-rootfs.tar.gz")) &&
+                              File.Exists(Path.Combine(path, "snapshot-manifest.json")))
+                .Select(path => new DirectoryInfo(path))
+                .OrderByDescending(info => info.CreationTimeUtc)
+                .ToArray();
+        }
+        catch (Exception ex)
+        {
+            OperationLogStore.Current?.Stage("backup-retention-failed", ex.Message);
+            return;
+        }
+        foreach (var directory in directories.Skip(keep))
+        {
+            try { directory.Delete(recursive: true); }
+            catch { }
+        }
+        OperationLogStore.Current?.Stage("backup-retention", $"保留最近 {keep} 份备份，清理 {Math.Max(0, directories.Length - keep)} 份旧备份");
     }
 
     private static string FormatBytes(long bytes)

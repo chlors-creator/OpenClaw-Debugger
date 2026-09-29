@@ -51,10 +51,12 @@
     }
     $('#settingsConnectButton').disabled = busyNow;
     $('#saveSettingsButton').disabled = busyNow;
+    $('#exportLogsButton').disabled = busyNow;
     $('#saveMemoryButton').disabled = busyNow || !appState.memoryEditing || !appState.dirtyMemory;
     $('#saveStickerButton').disabled = busyNow || !appState.stickerEditingEnabled || !appState.dirtyStickers;
-    const uploadReady = !busyNow && connected;
-    $('#pickStickerButton').disabled = !uploadReady;
+    const uploadActive = appState.uploadInProgress;
+    const uploadReady = connected && (!busyNow || uploadActive);
+    $('#pickStickerButton').disabled = !uploadReady || uploadActive;
     $('#uploadDropzone').classList.toggle('disabled', !uploadReady);
     syncRenameButton();
   }
@@ -144,6 +146,7 @@
   function hasDraggedFiles(dataTransfer) { return appState.uploadController ? appState.uploadController.hasDraggedFiles(dataTransfer) : false; }
   function getDroppedFiles(dataTransfer) { return appState.uploadController ? appState.uploadController.getDroppedFiles(dataTransfer) : []; }
   function uploadFiles(fileList) { return appState.uploadController && appState.uploadController.uploadFiles(fileList); }
+  function cancelUpload() { return appState.uploadController && appState.uploadController.cancelUpload(); }
 
   function renderBackupProgress(data) { return appState.backupController && appState.backupController.renderProgress(data); }
   function backupServer() { return appState.backupController && appState.backupController.backup(); }
@@ -151,7 +154,7 @@
   function cancelBackup() { return appState.backupController && appState.backupController.cancel(); }
 
   function getConnectionSettings() { return appState.settingsController && appState.settingsController.getConnectionSettings(); }
-  function fillSettings(value) { return appState.settingsController && appState.settingsController.fillSettings(value); }
+  function fillSettings(value, retentionOverride) { return appState.settingsController && appState.settingsController.fillSettings(value, retentionOverride); }
   function saveConnectionSettings(andConnect) { return appState.settingsController && appState.settingsController.saveConnectionSettings(andConnect); }
 
   function clearStickerImageCache() { return appState.stickerCacheController && appState.stickerCacheController.clearStickerImageCache(); }
@@ -306,14 +309,14 @@
       $, $$, appState, switchTab, connectServer, toggleBackupPause, cancelBackup,
       saveConnectionSettings, bridgeCall, reportError, setStatus, setDirtyState, saveMemory,
       renderMemoryList, renderStickerList, saveStickerRows, openRawEditor,
-      resetThemePalette, uploadFiles, openRenameDialog, submitStickerRename,
+      resetThemePalette, uploadFiles, cancelUpload, openRenameDialog, submitStickerRename,
       loadStickerThumbnail, hasDraggedFiles, getDroppedFiles, saveRawEditor,
       setBackdropValue, resetBackdrop, showToast, persistTheme
     });
     appState.eventBindings.wireEvents(); initializeBackdrop();
     try {
       const state = await bridgeCall('initialize', {});
-      fillSettings(state.settings.connection);
+      fillSettings(state.settings.connection, state.settings.backupRetentionCount);
       $('#privatePath').textContent = state.privateDirectory;
       $('#backupPath').textContent = state.backupDirectory;
       applyTheme(state.settings.themeName || 'Atri');

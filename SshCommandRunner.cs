@@ -31,6 +31,7 @@ internal static class SshCommandRunner
     {
         var detail = string.Join(Environment.NewLine,
             error.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Take(8));
+        OperationLogStore.Current?.SshFailure(detail);
         if (detail.Contains("Permission denied (", StringComparison.OrdinalIgnoreCase) ||
             detail.Contains("Permission denied, please try again", StringComparison.OrdinalIgnoreCase) ||
             detail.Contains("No supported authentication methods", StringComparison.OrdinalIgnoreCase))

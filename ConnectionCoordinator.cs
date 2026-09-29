@@ -53,7 +53,7 @@ public sealed class ConnectionCoordinator : IDisposable
             _remoteFiles,
             _remoteStickers,
             new StickerThumbnailCache(settings.PrivateDirectory),
-            new StickerUploadService(),
+            new StickerUploadService(settings.PrivateDirectory),
             () => settings.Connection,
             () => _snapshots,
             () => settings.PrivateDirectory,
@@ -66,7 +66,8 @@ public sealed class ConnectionCoordinator : IDisposable
             SettingsRepository.DefaultBackupDirectory,
             _isBusy,
             _setBusy,
-            _sendProgress);
+            _sendProgress,
+            () => settings.BackupRetentionCount);
         _initialized = true;
     }
 

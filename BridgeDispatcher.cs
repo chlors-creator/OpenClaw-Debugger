@@ -55,10 +55,22 @@ public sealed class BridgeDispatcher
             if (timeoutMs > 0) operationCancellation.CancelAfter(timeoutMs);
             if (!_operations.TryAdd(operationId, operationCancellation))
                 throw new InvalidOperationException("重复的界面操作标识。");
+            var operationLog = OperationLogStore.Current?.Begin(operationId, request.Command);
             try
             {
                 var result = await _dispatch(request.Command, request.Payload, operationCancellation.Token);
+                operationLog?.Complete();
                 _responses.Respond(id, true, result, null);
+            }
+            catch (OperationCanceledException) when (operationCancellation.IsCancellationRequested)
+            {
+                operationLog?.Complete("cancelled", false, "操作已取消");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                operationLog?.Complete("failed", false, ex.Message);
+                throw;
             }
             finally
             {

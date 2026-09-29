@@ -25,6 +25,7 @@ OpenClaw Debugger 是一个运行在 Windows 上的本地桌面管理工具，�
 - 支持 PNG、JPG/JPEG、GIF、WEBP、BMP；GIF 可播放。
 - 图片目录提供固定 256px 边界框缩略图；列表只请求并缓存缩略图，点击预览时才请求原图。缩略图会同时持久化到私密目录 `ThumbnailCache`，缓存键包含远端路径、文件大小、修改时间和可用哈希，远端文件变化后自动生成新版本；原图和缩略图仍带容量上限的 LRU 缓存，切换回来不会重复读取。
 - 可从文件选择器或拖放上传；单张上限 16 MiB。上传后自动更新远端目录登记。
+- 上传支持明确的“取消上传”按钮；界面显示当前文件、分块序号、整体速度和预计剩余时间。每块失败会自动重试，应用启动时会清理 `UploadStaging` 中上次异常退出留下的未完成上传。
 - 支持重命名图片，并同步维护目录及引用；拒绝同名覆盖。
 - 每张表情包有默认值为 `1` 的选择权重，写入目录数据。应用端按表情包适配的模型清单格式保留/更新相应权重字段。
 - 标签编辑会先预览变更，再以服务器端锁、SHA-256 前置校验、临时文件和目录 fsync 事务写入 `catalog.json` 与 `MANIFEST.md`（依据服务器现存清单格式处理）；第二个文件写入失败时会尝试回滚第一个文件。
@@ -43,6 +44,8 @@ OpenClaw Debugger 是一个运行在 Windows 上的本地桌面管理工具，�
 - 备份开始后顶部按钮变为“暂停备份”。暂停会保留远端快照和本机临时归档，继续时从当前传输位置恢复；按钮随之变为“继续备份”。快照生成阶段的暂停请求会在当前生成命令结束后等待，传输阶段可以直接暂停读取。
 - 备份进行时右侧显示“取消备份”按钮；取消会终止当前 SSH 传输、清理本轮临时归档，并恢复“备份服务器”按钮。
 - 归档文件为 `server-rootfs.tar.gz`，清单记录主机、账号、时间、字节数、SHA-256、范围和一致性说明。失败时会尽力清理未完成的临时目录。
+- 备份开始前检查本地磁盘空间；归档写入 `server-rootfs.tar.gz.part`，传输结束后先解压读取验证 gzip 完整性，再原子改名为正式归档。清单也采用临时文件加原子改名。
+- 设置页可以调整备份保留数量（1–30，默认 5）；新备份完成后自动删除更旧的完整备份。应用启动时会清理上次异常退出留下的 `.staging-*` 临时目录。
 - 归档覆盖 `/`，包含已挂载文件系统，但排除 `/proc`、`/sys`、`/dev`、`/run`。这是在线文件级 tar 归档，不是原子磁盘/卷快照；运行中变化的文件可能出现时间点不一致。
 - 服务器端快照生成完成后会在任务结束时删除 `/tmp/.openclaw-debugger-*.tar.gz`；取消、失败和窗口关闭也会尽力清理。快照是任务开始时在线生成的文件级归档，生成期间文件可能变化，但传输重试始终读取同一份远端归档。
 - 当前实现提供创建与查看备份目录，不提供整机归档恢复流程。
@@ -104,6 +107,8 @@ OpenClaw-Debugger/
 ├── RemoteSnapshotClient.cs # 快照域客户端门面
 ├── RemoteSnapshotTransport.cs # 快照生成、断点传输和清理实现
 ├── BackupCoordinator.cs   # 备份启动、暂停、继续、取消和进度协调
+├── OperationLogStore.cs    # 结构化日志、脱敏和导出
+├── LoggingBridgeHandler.cs # 日志导出命令
 ├── StickerService.cs      # 表情包目录、标签、重命名和上传业务
 ├── StickerUploadService.cs # 分块上传会话和本地临时文件
 ├── StickerThumbnailCache.cs # 缩略图生成、持久化和容量清理
@@ -115,7 +120,8 @@ OpenClaw-Debugger/
 ├── LocalSnapshotStore.cs  # DPAPI 加密的远端文件回滚副本
 ├── LocalServerBackupStore.cs # 整机归档和本机清单写入
 ├── SettingsRepository.cs  # 私密目录和本机设置
-└── OpenClawDebugger.csproj
+├── OpenClawDebugger.csproj
+└── OpenClawDebugger.Tests.csproj # 独立自动化测试运行器
 ```
 
 ## 本机私密数据
@@ -128,6 +134,7 @@ OpenClaw-Debugger/
 ├── Rollback\                 # DPAPI 加密的远端文件旧版本
 ├── Exports\
 ├── Secrets\
+├── Logs\                     # 按天保存的结构化 JSONL 操作日志
 ├── UploadStaging\            # 分块上传临时文件，提交或取消后删除
 ├── ThumbnailCache\           # 固定尺寸缩略图持久化缓存
 └── OpenClaw-Server-Backup\   # 整机 tar.gz 和快照清单
@@ -151,6 +158,7 @@ OpenClaw-Debugger/
 - 表情包上传按 `Blob.slice()` 逐块读取浏览器文件，每块计算 SHA-256，失败块最多自动重试 3 次；后端按偏移和校验值接收，并对重复提交的同一分块幂等返回，浏览器不会再一次性读取整张图片。
 - 连接默认值和主题偏好存入私密目录设置文件；主题调色板及背景微调值存于本机浏览器 localStorage。
 - 桌面应用图标来自 `Assets/OpenClawDebugger.ico`；不要在仓库中加入服务器密钥或备份产物。
+- `OperationLogStore.cs` 记录操作 ID、开始时间、阶段、耗时、重试次数和 SSH 失败原因；日志正文会自动隐藏本地路径、私密目录和敏感参数。设置页的“导出操作日志”会把合并后的 JSONL 写入 `Exports` 并打开私密目录。
 
 ## P1 / P2 拆分完成情况
 
@@ -176,6 +184,13 @@ OpenClaw-Debugger/
 - 连接、记忆读取/保存、图片预览、原始标签保存和备份使用 `AbortController` 与代际检查，旧请求完成后不会覆盖新页面状态。
 - 表情包上传按固定分块从 `Blob` 读取，每块携带偏移和 SHA-256；失败块最多重试 3 次，服务器对已接收的相同分块幂等确认，避免重复上传和整图内存占用。
 
+## P6 可靠性、日志与测试
+
+- 上传控制器提供取消按钮、当前分块、速度和预计剩余时间；窗口关闭或应用启动时会取消并清理本地上传临时文件。
+- 本地备份执行磁盘空间预检、gzip 完整性验证、归档和清单原子提交、保留数量清理，以及启动时残留 `.staging-*` 清理。
+- `OperationLogStore` 以 JSONL 保存操作生命周期和 SSH 失败原因，统一脱敏并支持从设置页一键导出。
+- `OpenClawDebugger.Tests.csproj` 是无第三方测试依赖的运行器，用来验证备份控制和重试、上传分块幂等性、标签写入前置保护、协议校验、旧请求保护和日志脱敏。
+
 ## 运行与构建
 
 环境要求：
@@ -199,9 +214,15 @@ dotnet run --project .\OpenClawDebugger.csproj
 dotnet build .\OpenClawDebugger.csproj
 ```
 
+自动化测试使用无外部测试框架的独立运行器，覆盖备份暂停/继续/取消、网络中断断点续传、上传分块校验与重复分块、标签事务前置回滚、桥接参数校验、旧请求保护和日志脱敏：
+
+```powershell
+dotnet run --project .\OpenClawDebugger.Tests.csproj
+```
+
 ## 当前状态与交接提示
 
-- 最近一次已完成构建：`Lifecycle` 配置输出到 `bin\Lifecycle\net10.0-windows`，构建成功，0 个警告、0 个错误；所有 Web UI JavaScript 文件均通过语法检查，前端状态模块烟雾检查通过，并执行了工作树差异检查。没有执行真实服务器整机备份或恢复测试。
+- 最近一次基线构建：`Lifecycle` 配置输出到 `bin\Lifecycle\net10.0-windows`，构建成功，0 个警告、0 个错误；本次新增的 C# 核心模块通过独立语法/编译检查，8 项自动化测试全部通过，所有 Web UI JavaScript 文件均通过语法检查。没有执行真实服务器整机备份或恢复测试。
 - 桌面快捷方式仍按本机发布目录配置；构建输出切换后请从对应发布目录重新启动。已运行的旧窗口不会热更新；关闭后从桌面快捷方式重新启动即可加载新版。
 - 仓库目标目录是 `Openclaw\OpenClaw-Debugger`。此前项目从 Napcat 工作区迁移到 Openclaw；修改前应先核对当前实际工作目录，避免改错同名目录。
 - 新对话开始时先读本 README、`git status` 和相关源码，再确认用户当前要改的功能。不要假设工作树干净，也不要把私密目录复制进仓库。

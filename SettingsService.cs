@@ -28,7 +28,12 @@ public sealed class SettingsService
             throw new InvalidDataException("SSH 端口需要在 1–65535 之间。");
         ValidateRemotePath(incoming.WorkspacePath, "工作区");
         ValidateRemotePath(incoming.StickersPath, "表情包目录");
+        if (!payload.TryGetProperty("backupRetentionCount", out var retention) ||
+            retention.ValueKind != JsonValueKind.Number || !retention.TryGetInt32(out var retentionCount) ||
+            retentionCount is < 1 or > 30)
+            throw new InvalidDataException("备份保留数量需要在 1–30 之间。");
         settings.Connection = incoming;
+        settings.BackupRetentionCount = retentionCount;
         settings.PrivateDirectory = SettingsRepository.DefaultPrivateDirectory;
         await SettingsRepository.SaveAsync(settings);
     }

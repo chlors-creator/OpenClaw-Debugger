@@ -20,7 +20,14 @@
         rawSaveController: null,
         rawSaveGeneration: 0,
         uploadInProgress: false,
-        uploadController: null
+        uploadController: null,
+        uploadId: null,
+        uploadCancelRequested: false,
+        uploadStartedAt: 0,
+        uploadTransferredBeforeFile: 0,
+        uploadTotalBytes: 0,
+        uploadChunkIndex: 0,
+        uploadChunkCount: 0
       };
     }
   };

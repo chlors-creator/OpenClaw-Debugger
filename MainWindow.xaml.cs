@@ -38,6 +38,7 @@ public partial class MainWindow : Window
         {
             _settings = await SettingsRepository.LoadAsync();
             _settings.PrivateDirectory = SettingsRepository.DefaultPrivateDirectory;
+            OperationLogStore.Configure(_settings.PrivateDirectory);
             if (_settings.ThemeName is not ("Atri" or "Luoxi" or "Light")) _settings.ThemeName = "Atri";
             _connection.Initialize(_settings);
             _commandRouter = CreateCommandRouter();
@@ -128,6 +129,7 @@ public partial class MainWindow : Window
                 Close();
             },
             OpenFolder).Register(router);
+        new LoggingBridgeHandler().Register(router);
         return router;
     }
 

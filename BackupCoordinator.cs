@@ -9,33 +9,42 @@ public sealed class BackupCoordinator : IDisposable
     private readonly Func<bool> _isBusy;
     private readonly Action<bool> _setBusy;
     private readonly Action<string, object> _sendProgress;
+    private readonly Func<int> _retentionCount;
     private BackupPauseController? _pauseController;
     private CancellationTokenSource? _cancellation;
     private ServerSnapshotProgress? _lastProgress;
+    private int _running;
 
     public BackupCoordinator(
         IRemoteSnapshotClient remote,
         string backupDirectory,
         Func<bool> isBusy,
         Action<bool> setBusy,
-        Action<string, object> sendProgress)
+        Action<string, object> sendProgress,
+        Func<int>? retentionCount = null)
     {
         _remote = remote;
         _backupDirectory = backupDirectory;
         _isBusy = isBusy;
         _setBusy = setBusy;
         _sendProgress = sendProgress;
+        _retentionCount = retentionCount ?? (() => 5);
     }
 
-    public bool IsRunning => _cancellation is not null;
+    public bool IsRunning => Volatile.Read(ref _running) != 0;
     public ServerSnapshotProgress? CurrentProgress => _lastProgress;
 
     public async Task<ServerSnapshotResult> StartAsync(
         ConnectionSettings settings,
         CancellationToken cancellationToken = default)
     {
-        if (_isBusy()) throw new InvalidOperationException("当前有操作正在进行。");
-        if (_cancellation is not null) throw new InvalidOperationException("当前已有服务器备份正在运行。");
+        if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            throw new InvalidOperationException("当前已有服务器备份正在运行。");
+        if (_isBusy())
+        {
+            Interlocked.Exchange(ref _running, 0);
+            throw new InvalidOperationException("当前有操作正在进行。");
+        }
 
         var pauseController = new BackupPauseController();
         using var backupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -51,7 +60,7 @@ public sealed class BackupCoordinator : IDisposable
                 _sendProgress("backup", snapshotProgress);
             });
             return await new LocalServerBackupStore(_backupDirectory)
-                .CreateAsync(settings, _remote, progress, pauseController, backupCancellation.Token);
+                .CreateAsync(settings, _remote, progress, pauseController, backupCancellation.Token, _retentionCount());
         }
         catch (OperationCanceledException) when (backupCancellation.IsCancellationRequested)
         {
@@ -74,6 +83,7 @@ public sealed class BackupCoordinator : IDisposable
                 _cancellation = null;
             _lastProgress = null;
             _setBusy(false);
+            Interlocked.Exchange(ref _running, 0);
         }
     }
 

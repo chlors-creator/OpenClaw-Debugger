@@ -230,7 +230,17 @@ def write_pair():
     except SystemExit:
         raise
     except Exception as error:
-        if replaced_catalog and not replaced_manifest and old_catalog is not None:
+        if replaced_manifest and old_manifest is not None:
+            try:
+                fd, restore_path = tempfile.mkstemp(prefix=".openclaw-labels-rollback-", dir=ROOTS["stickers"])
+                with os.fdopen(fd, "wb") as f:
+                    f.write(old_manifest)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(restore_path, manifest_path)
+            except Exception:
+                pass
+        if replaced_catalog and old_catalog is not None:
             try:
                 fd, restore_path = tempfile.mkstemp(prefix=".openclaw-labels-rollback-", dir=ROOTS["stickers"])
                 with os.fdopen(fd, "wb") as f:

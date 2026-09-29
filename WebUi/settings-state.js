@@ -8,7 +8,8 @@
           username: 'admin',
           port: 22,
           workspacePath: '/home/admin/.openclaw/workspace',
-          stickersPath: '/home/admin/.openclaw/workspace/stickers'
+          stickersPath: '/home/admin/.openclaw/workspace/stickers',
+          backupRetentionCount: 5
         },
         themeController: null,
         saveController: null

@@ -5,7 +5,7 @@
       $, $$, appState, switchTab, connectServer, toggleBackupPause, cancelBackup,
       saveConnectionSettings, bridgeCall, reportError, setStatus, setDirtyState, saveMemory,
       renderMemoryList, renderStickerList, saveStickerRows, openRawEditor,
-      resetThemePalette, uploadFiles, openRenameDialog, submitStickerRename,
+      resetThemePalette, uploadFiles, cancelUpload, openRenameDialog, submitStickerRename,
       loadStickerThumbnail, hasDraggedFiles, getDroppedFiles, saveRawEditor,
       setBackdropValue, resetBackdrop, showToast, persistTheme
     } = deps;
@@ -20,6 +20,14 @@
     $('#settingsConnectButton').addEventListener('click', () => saveConnectionSettings(true));
     $('#saveSettingsButton').addEventListener('click', () => saveConnectionSettings(false));
     $('#openPrivateButton').addEventListener('click', () => bridgeCall('openPrivateFolder', {}).catch(reportError));
+    $('#exportLogsButton').addEventListener('click', async () => {
+      try {
+        const result = await bridgeCall('exportLogs', {});
+        setStatus('操作日志已导出：' + result.path);
+        showToast('操作日志已导出到私密目录。');
+        await bridgeCall('openPrivateFolder', {});
+      } catch (error) { reportError(error); }
+    });
     $('#editMemoryButton').addEventListener('click', () => {
       if (!appState.currentMemory) return;
       appState.memoryEditing = true; $('#memoryEditor').readOnly = false;
@@ -49,6 +57,7 @@
     uploadZone.addEventListener('click', event => { if (!event.target.closest('button') && !event.target.closest('input') && !uploadZone.classList.contains('disabled')) uploadInput.click(); });
     uploadZone.addEventListener('keydown', event => { if ((event.key === 'Enter' || event.key === ' ') && !uploadZone.classList.contains('disabled')) { event.preventDefault(); uploadInput.click(); } });
     uploadInput.addEventListener('change', () => { uploadFiles(uploadInput.files).finally(() => { uploadInput.value = ''; }); });
+    $('#cancelUploadButton').addEventListener('click', event => { event.stopPropagation(); cancelUpload(); });
     $('#renameStickerButton').addEventListener('click', openRenameDialog);
     $('#renameCancelButton').addEventListener('click', () => $('#renameDialog').close());
     $('#renameCloseButton').addEventListener('click', () => $('#renameDialog').close());

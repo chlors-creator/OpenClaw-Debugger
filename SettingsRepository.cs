@@ -16,8 +16,11 @@ public static class SettingsRepository
     {
         var settings = new UserSettings { PrivateDirectory = DefaultPrivateDirectory };
         Directory.CreateDirectory(settings.PrivateDirectory);
-        foreach (var name in new[] { "Rollback", "Exports", "Secrets", "ThumbnailCache" })
+        OperationLogStore.Configure(settings.PrivateDirectory);
+        foreach (var name in new[] { "Rollback", "Exports", "Secrets", "Logs", "ThumbnailCache", "UploadStaging" })
             Directory.CreateDirectory(Path.Combine(settings.PrivateDirectory, name));
+        LocalServerBackupStore.CleanupStagingDirectories(DefaultBackupDirectory);
+        StickerUploadService.CleanupStaging(settings.PrivateDirectory);
 
         var path = Path.Combine(settings.PrivateDirectory, "settings.json");
         if (!File.Exists(path))
@@ -33,6 +36,7 @@ public static class SettingsRepository
             {
                 loaded.PrivateDirectory = settings.PrivateDirectory;
                 loaded.Connection ??= new ConnectionSettings();
+                loaded.BackupRetentionCount = Math.Clamp(loaded.BackupRetentionCount, 1, 30);
                 settings = loaded;
             }
         }
